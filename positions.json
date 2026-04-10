@@ -1,0 +1,12 @@
+[
+  {
+    "address": "0x5837e4189819637853a357af36650902347f5e73",
+    "chainId": 42161,
+    "protocol": "morpho-v1",
+    "name": "KPK-USDC-YIELDV2",
+    "symbol": "USDC",
+    "decimals": 18,
+    "depositPack": "morpho-zaps",
+    "addedAt": "2026-04-10T21:16:34.667Z"
+  }
+]

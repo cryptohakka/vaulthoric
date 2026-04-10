@@ -90,8 +90,8 @@ const CHAINS = {
     name: 'Arbitrum', network: 'arbitrum',
     rpcs: [
       process.env.RPC_ARB,
-      'https://arbitrum.drpc.org',
       'https://arb1.arbitrum.io/rpc',
+      'https://arbitrum-one.publicnode.com',
       'https://rpc.ankr.com/arbitrum',
     ].filter(Boolean),
   },
@@ -108,7 +108,7 @@ const CHAINS = {
       process.env.RPC_AVAX,
       'https://avalanche.drpc.org',
       'https://api.avax.network/ext/bc/C/rpc',
-      'https://rpc.ankr.com/avalanche',
+      'https://rpc.ankr.com/arbitrum',
     ].filter(Boolean),
   },
   59144: {
@@ -201,7 +201,7 @@ function getChainRpc(chainId) {
   return CHAINS[chainId]?.rpcs?.[0] || null;
 }
 
-// 複数RPCを順番に試してProviderを返す
+// 複数RPCを順番に試してProviderを返す（eth_callまで確認）
 async function getProviderWithFallback(chainId) {
   const { ethers } = require('ethers');
   const rpcs = getChainRpcs(chainId);
@@ -209,6 +209,8 @@ async function getProviderWithFallback(chainId) {
     try {
       const provider = new ethers.JsonRpcProvider(rpc, undefined, { staticNetwork: true });
       await provider.getBlockNumber();
+      // eth_callも確認（getBlockNumberは通るのにeth_callが壊れてるRPCがある）
+      await provider.getCode('0x000000000000000000000000000000000000dEaD');
       return provider;
     } catch (e) {
       // 次のRPCを試す

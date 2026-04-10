@@ -11,6 +11,8 @@ process.stderr.write = (chunk, ...args) => {
 
 const axios = require('axios');
 const readline = require('readline');
+const fs = require('fs');
+const path = require('path');
 const { ethers } = require('ethers');
 const { getVaults } = require('./earn');
 const { rankVaults } = require('./scorer');
@@ -20,9 +22,46 @@ const { printVaultTable } = require('./agent');
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-flash-1.5';
+const POSITIONS_FILE = path.join(__dirname, 'positions.json');
 
 function prompt(rl, question) {
   return new Promise(resolve => rl.question(question, resolve));
+}
+
+// positions.json読み込み
+function loadPositions() {
+  try {
+    if (fs.existsSync(POSITIONS_FILE)) {
+      return JSON.parse(fs.readFileSync(POSITIONS_FILE, 'utf8'));
+    }
+  } catch (e) {}
+  return [];
+}
+
+// positions.json保存
+function savePositions(positions) {
+  fs.writeFileSync(POSITIONS_FILE, JSON.stringify(positions, null, 2));
+}
+
+// deposit成功後にpositions.jsonに記録
+function recordPosition(vault, chainId) {
+  const positions = loadPositions();
+  const key = `${chainId}-${vault.address.toLowerCase()}`;
+  const exists = positions.find(p => `${p.chainId}-${p.address.toLowerCase()}` === key);
+  if (!exists) {
+    positions.push({
+      address: vault.address,
+      chainId,
+      protocol: vault.protocol,
+      name: vault.name,
+      symbol: vault.underlyingTokens?.[0]?.symbol || 'USDC',
+      decimals: 18, // ERC-4626はほぼ18、aTokenは6（withdraw.jsでon-chain確認）
+      depositPack: vault.depositPacks?.[0]?.name || '',
+      addedAt: new Date().toISOString(),
+    });
+    savePositions(positions);
+    console.log(`📝 Position recorded to positions.json`);
+  }
 }
 
 // LLMでユーザー指示を解析
@@ -92,7 +131,6 @@ async function checkBalance(chainId, walletAddress) {
 }
 
 // vaultをフィルタリング
-// minApy: 足切り条件、mode: その中での選び方
 function filterVaults(ranked, { minApy, mode } = {}) {
   let filtered = minApy ? ranked.filter(v => v.apy >= minApy) : [...ranked];
   if (mode === 'safest') {
@@ -100,7 +138,6 @@ function filterVaults(ranked, { minApy, mode } = {}) {
   } else if (mode === 'highest') {
     filtered.sort((a, b) => b.apy - a.apy);
   } else {
-    // balanced: 総合スコア最大（デフォルト）
     filtered.sort((a, b) => b.score - a.score);
   }
   return filtered;
@@ -180,9 +217,7 @@ async function run(instruction, walletAddress) {
 
     if (filtered.length > 0) {
       selectedVault = filtered[0];
-
     } else if (params.minApy) {
-      // フォールバック1: 同チェーン・APY条件緩和
       console.log(`\n  ⚠️  No vault with APY >= ${params.minApy}% on ${getChainName(params.chainId)}`);
       const lowerApy = params.minApy * 0.6;
       const fallback1 = filterVaults(ranked, { minApy: lowerApy, mode: params.mode });
@@ -190,14 +225,10 @@ async function run(instruction, walletAddress) {
       if (fallback1.length > 0) {
         console.log(`  Best available: ${fallback1[0].apy}% APY (${fallback1[0].vault.protocol} on ${fallback1[0].vault.network})`);
         const ans = await prompt(rl, `  Accept ${fallback1[0].apy}% APY? (below your ${params.minApy}% target) (y/n): `);
-
-        if (ans.toLowerCase() === 'y') {
-          selectedVault = fallback1[0];
-        }
+        if (ans.toLowerCase() === 'y') selectedVault = fallback1[0];
       }
 
       if (!selectedVault) {
-        // フォールバック2: 全チェーン・元のAPY条件
         console.log(`\n  Searching all chains for APY >= ${params.minApy}%...`);
         const allRanked = rankVaults(allVaults, depositAmount, fromChainId);
         const fallback2 = filterVaults(allRanked, { minApy: params.minApy, mode: params.mode });
@@ -205,7 +236,6 @@ async function run(instruction, walletAddress) {
         if (fallback2.length > 0) {
           console.log(`  Found: ${fallback2[0].vault.name} (${fallback2[0].vault.protocol}) on ${fallback2[0].vault.network} — ${fallback2[0].apy}% APY`);
           const ans2 = await prompt(rl, `  Accept vault on ${fallback2[0].vault.network}? (y/n): `);
-
           if (ans2.toLowerCase() === 'y') {
             selectedVault = fallback2[0];
           } else {
@@ -229,7 +259,7 @@ async function run(instruction, walletAddress) {
       return;
     }
 
-    // ステップ4: 条件提示
+    // ステップ5: 条件提示
     const needsBridge = fromChainId !== selectedVault.vault.chainId;
     console.log(`\n📋 Vault Proposal:`);
     console.log(`  Vault     : ${selectedVault.vault.name} (${selectedVault.vault.protocol})`);
@@ -241,7 +271,7 @@ async function run(instruction, walletAddress) {
     console.log(`  Gas est.  : $${selectedVault.totalGasCost.toFixed(2)}${needsBridge ? ' (incl. bridge)' : ''}`);
     console.log(`  Net yield : $${selectedVault.netYield.toFixed(2)}/year`);
 
-    // ステップ5: ユーザー確認
+    // ステップ6: ユーザー確認
     const confirm = await prompt(rl, '\n✅ Proceed with deposit? (y/n): ');
     if (confirm.toLowerCase() !== 'y') {
       console.log('\n❌ Deposit cancelled.');
@@ -249,7 +279,7 @@ async function run(instruction, walletAddress) {
       return;
     }
 
-    // ステップ6: deposit実行
+    // ステップ7: deposit実行
     console.log('\n🚀 Executing deposit...');
     const pk = process.env.PRIVATE_KEY;
     if (!pk) throw new Error('PRIVATE_KEY not set');
@@ -265,7 +295,11 @@ async function run(instruction, walletAddress) {
       fromTokenAddress: balanceInfo.tokenAddress,
       vaultTokenAddress: selectedVault.vault.address,
       amountWei: amountWei.toString(),
+      depositPack: selectedVault.vault.depositPacks?.[0]?.name || '',
     });
+
+    // deposit成功後にpositions.jsonに記録
+    recordPosition(selectedVault.vault, selectedVault.vault.chainId);
 
     console.log('\n🎉 Deposit complete! Stay Vaulthoric.');
     rl.close();
