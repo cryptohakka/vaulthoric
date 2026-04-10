@@ -5,7 +5,7 @@ const { Writable } = require('stream');
 const originalStderrWrite = process.stderr.write.bind(process.stderr);
 process.stderr.write = (chunk, ...args) => {
   const msg = chunk.toString();
-  if (msg.includes('JsonRpcProvider failed') || msg.includes('retry in')) return true;
+  if (msg.includes('JsonRpcProvider failed') || msg.includes('retry in 1s')) return true;
   return originalStderrWrite(chunk, ...args);
 };
 
@@ -138,16 +138,8 @@ async function run(instruction, walletAddress) {
         console.log(`  ${getChainName(params.chainId)}: ${balanceInfo.usd.toFixed(4)} ${asset}`);
       } else {
         console.log(`  ❌ No ${asset} found on ${getChainName(params.chainId)}`);
-        console.log('  Scanning supported chains...');
-        for (const chainId of getScanChainIds()) {
-          const b = await checkBalance(chainId, walletAddress);
-          if (b && b.usd > 0.01) {
-            balanceInfo = b;
-            params.chainId = chainId;
-            console.log(`  Found: ${getChainName(chainId)}: ${b.usd.toFixed(4)} ${asset}`);
-            break;
-          }
-        }
+        rl.close();
+        return;
       }
     } else {
       for (const chainId of getScanChainIds()) {
@@ -262,7 +254,7 @@ async function run(instruction, walletAddress) {
     const pk = process.env.PRIVATE_KEY;
     if (!pk) throw new Error('PRIVATE_KEY not set');
 
-    const provider = new ethers.JsonRpcProvider(getChainRpc(fromChainId), undefined, { staticNetwork: true });
+    const provider = await getProviderWithFallback(fromChainId);
     const signer = new ethers.Wallet(pk, provider);
     const amountWei = ethers.parseUnits(depositAmount.toFixed(6), balanceInfo.decimals);
 
