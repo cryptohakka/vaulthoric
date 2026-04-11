@@ -237,6 +237,63 @@ async function withdrawPosition(position, walletAddress) {
   }
 }
 
+
+// ─── Non-interactive Withdraw (for rebalance.js) ─────────────────────────────
+
+async function withdrawAll(position) {
+  const walletAddress = new ethers.Wallet(process.env.PRIVATE_KEY).address;
+  const toToken = USDC_ADDRESSES[position.chainId];
+  if (!toToken) throw new Error(`No USDC address for chain ${position.chainId}`);
+
+  const provider = await getProviderWithFallback(position.chainId);
+  const signer   = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+
+  // aave-zaps / neverland-zaps → Aave Pool direct withdraw
+  if ((position.depositPack === 'aave-zaps' || position.depositPack === 'neverland-zaps') && AAVE_POOLS[position.chainId]) {
+    console.log('\n🏦 Withdrawing from Aave directly...');
+    const pool           = new ethers.Contract(AAVE_POOLS[position.chainId], AAVE_POOL_ABI, signer);
+    const withdrawAmount = ethers.parseUnits(position.valueUsd.toFixed(6), 6);
+    const tx = await pool.withdraw(toToken, withdrawAmount, walletAddress);
+    console.log(`🔗 Tx hash: ${tx.hash}`);
+    const receipt = await tx.wait();
+    console.log(`✅ Confirmed in block: ${receipt.blockNumber}`);
+    return { success: true, txHash: tx.hash };
+  }
+
+  // ERC-4626 redeem
+  try {
+    console.log('\n🔄 Trying ERC-4626 redeem...');
+    const vault = new ethers.Contract(position.vaultAddress, ERC4626_ABI, signer);
+    await vault.redeem.estimateGas(position.lpBalance, walletAddress, walletAddress);
+    const tx = await vault.redeem(position.lpBalance, walletAddress, walletAddress);
+    console.log(`🔗 Tx hash: ${tx.hash}`);
+    const receipt = await tx.wait();
+    console.log(`✅ Confirmed in block: ${receipt.blockNumber}`);
+    return { success: true, txHash: tx.hash };
+  } catch (redeemErr) {
+    console.log(`  ⚠️  ERC-4626 redeem failed: ${redeemErr.message?.slice(0, 60)}`);
+  }
+
+  // LI.FI fallback
+  console.log('\n🔍 Getting withdrawal quote...');
+  const params = new URLSearchParams({
+    fromChain:   position.chainId,
+    toChain:     position.chainId,
+    fromToken:   position.lpTokenAddress,
+    toToken,
+    fromAmount:  position.lpBalance.toString(),
+    fromAddress: walletAddress,
+    toAddress:   walletAddress,
+    slippage:    '0.005',
+  });
+  const res        = await axios.get(`https://li.quest/v1/quote?${params}`, { headers: LIFI_HEADERS });
+  const freshQuote = res.data;
+  await ensureAllowance(signer, freshQuote.action.fromToken.address, freshQuote.estimate.approvalAddress, freshQuote.action.fromAmount);
+  const tx = await sendTx(signer, freshQuote.transactionRequest);
+  await pollStatus(tx.hash, position.chainId, position.chainId);
+  return { success: true, txHash: tx.hash };
+}
+
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -260,4 +317,8 @@ async function main() {
   await withdrawPosition(positions[idx], walletAddress);
 }
 
-main().catch(console.error).finally(() => process.exit(0));
+if (require.main === module) {
+  main().catch(console.error).finally(() => process.exit(0));
+}
+
+module.exports = { scanPositions, withdrawAll };

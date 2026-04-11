@@ -311,12 +311,24 @@ async function depositBestVault({ chainId, amountWei, wallet, mode = 'best' }) {
     console.log(`    Risk      : ${riskLabel}`);
     console.log(`    Withdraw  : ${liquidLabel}`);
 
+    const costRatio      = grossYield > 0 ? (candidate.totalGasCost / grossYield) * 100 : 999;
+    const costRatioLabel = costRatio > 25 ? '❌ Very high' : costRatio > 10 ? '⚠️  High' : '✅ OK';
+
     console.log(`\n  📈 Expected economics:`);
     console.log(`    Gross yield/yr : $${grossYield.toFixed(2)}`);
     console.log(`    Est. costs     : $${candidate.totalGasCost.toFixed(2)}`);
+    console.log(`    Cost ratio     : ${costRatio.toFixed(1)}%  ${costRatioLabel}`);
     console.log(`    Net yield/yr   : $${netYield.toFixed(2)}`);
     if (breakEvenDays !== null) {
       console.log(`    Break-even     : ${breakEvenDays} day${breakEvenDays === 1 ? '' : 's'}`);
+    }
+
+    if (costRatio > 25) {
+      console.log(`\n  ❌ Not recommended: gas costs are ${costRatio.toFixed(1)}% of expected yield.`);
+      console.log(`     Recommended minimum deposit: ~$${Math.ceil(candidate.totalGasCost / (candidate.apy / 100) / 0.1)}`);
+    } else if (costRatio > 10) {
+      console.log(`\n  ⚠️  Warning: gas costs are ${costRatio.toFixed(1)}% of expected yield.`);
+      console.log(`     Recommended minimum deposit: ~$${Math.ceil(candidate.totalGasCost / (candidate.apy / 100) / 0.1)}`);
     }
     try {
       const result = await depositToVault({

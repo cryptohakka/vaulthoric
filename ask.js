@@ -118,9 +118,57 @@ function filterVaults(ranked, { minApy, mode } = {}) {
   return filtered;
 }
 
+// ─── AI Vault Analysis ───────────────────────────────────────────────────────
+
+async function generateWhyAnalysis(candidate, depositUsd) {
+  if (!OPENROUTER_API_KEY) return null;
+  try {
+    const costRatio = candidate.totalGasCost > 0 && depositUsd * (candidate.apy / 100) > 0
+      ? ((candidate.totalGasCost / (depositUsd * (candidate.apy / 100))) * 100).toFixed(1)
+      : 'N/A';
+
+    const res = await axios.post(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        model:      OPENROUTER_MODEL,
+        max_tokens: 120,
+        messages: [
+          {
+            role: 'system',
+            content: `You are a DeFi investment analyst. Explain in 2-4 sentences why this vault was selected. Use risk-adjusted reasoning and simple language. No hype, no bullet points, no markdown. Plain text only.`,
+          },
+          {
+            role: 'user',
+            content: `Vault: ${candidate.vault.name} (${candidate.vault.protocol})
+Network: ${candidate.vault.network}
+APY: ${candidate.apy}%
+Stability: ${candidate.stability.toFixed(3)} / 1.0 (30-day consistency)
+TVL: $${(candidate.tvlUsd / 1e6).toFixed(1)}M
+Trust score: ${candidate.trust}
+Risk: ${candidate.trust >= 1.25 && candidate.stability >= 0.9 ? 'Low' : candidate.trust >= 1.1 && candidate.stability >= 0.7 ? 'Low-Medium' : 'Medium'}
+Gas cost ratio: ${costRatio}% of annual yield
+Deposit amount: $${depositUsd.toFixed(2)}`,
+          },
+        ],
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type':  'application/json',
+          'HTTP-Referer':  'https://vaulthoric.xyz',
+          'X-Title':       'Vaulthoric Agent',
+        },
+      }
+    );
+    return res.data.choices[0].message.content.trim();
+  } catch {
+    return null;
+  }
+}
+
 // ─── Candidate Proposal Display ──────────────────────────────────────────────
 
-function printCandidateProposal(candidate, depositUsd, fromChainId, asset) {
+async function printCandidateProposal(candidate, depositUsd, fromChainId, asset) {
   const grossYield    = depositUsd * (candidate.apy / 100);
   const netYield      = grossYield - candidate.totalGasCost;
   const breakEvenDays = netYield > 0 ? Math.ceil((candidate.totalGasCost / grossYield) * 365) : null;
@@ -140,16 +188,37 @@ function printCandidateProposal(candidate, depositUsd, fromChainId, asset) {
   console.log(`  Deposit   : $${depositUsd.toFixed(2)} ${asset} from ${getChainName(fromChainId)}`);
   console.log(`  Gas est.  : $${candidate.totalGasCost.toFixed(2)}${needsBridge ? ' (incl. bridge)' : ''}`);
   console.log(`\n💡 Why this vault?`);
+  const aiAnalysis = await generateWhyAnalysis(candidate, depositUsd);
+  if (aiAnalysis) {
+    console.log(`  🤖 AI Analysis:`);
+    console.log(`  ${aiAnalysis}`);
+    console.log('');
+  }
   console.log(`  Stability : ${candidate.stability.toFixed(3)} / 1.0  (APY consistency over 30d)`);
   console.log(`  Trust     : ${candidate.trust.toFixed(2)}  (protocol credibility score)`);
   console.log(`  Risk      : ${riskLabel}`);
   console.log(`  Withdraw  : ${liquidLabel}`);
+  const costRatio = grossYield > 0 ? (candidate.totalGasCost / grossYield) * 100 : 999;
+  const costRatioLabel = costRatio > 25 ? '❌ Very high' : costRatio > 10 ? '⚠️  High' : '✅ OK';
+
   console.log(`\n📈 Expected economics:`);
   console.log(`  Gross yield/yr : $${grossYield.toFixed(2)}`);
   console.log(`  Est. costs     : $${candidate.totalGasCost.toFixed(2)}`);
+  console.log(`  Cost ratio     : ${costRatio.toFixed(1)}%  ${costRatioLabel}`);
   console.log(`  Net yield/yr   : $${netYield.toFixed(2)}`);
   if (breakEvenDays !== null) {
     console.log(`  Break-even     : ${breakEvenDays} day${breakEvenDays === 1 ? '' : 's'}`);
+  }
+
+  const costRatioVal = grossYield > 0 ? (candidate.totalGasCost / grossYield) * 100 : 999;
+  if (costRatioVal > 25) {
+    const minRec = Math.max(50, Math.ceil(candidate.totalGasCost / (candidate.apy / 100) / 0.05));
+    console.log(`\n  ❌ Not recommended: gas costs are ${costRatioVal.toFixed(1)}% of expected yield.`);
+    console.log(`     Recommended minimum deposit: ~$${minRec}`);
+  } else if (costRatioVal > 10) {
+    const minRec = Math.max(50, Math.ceil(candidate.totalGasCost / (candidate.apy / 100) / 0.05));
+    console.log(`\n  ⚠️  Warning: gas costs are ${costRatioVal.toFixed(1)}% of expected yield.`);
+    console.log(`     Recommended minimum deposit: ~$${minRec}`);
   }
 }
 
@@ -371,17 +440,38 @@ async function run(instruction, walletAddress) {
     }
 
     console.log(`\n💡 Why this vault?`);
+    const aiAnalysis = await generateWhyAnalysis(selectedVault, depositAmount);
+    if (aiAnalysis) {
+      console.log(`  🤖 AI Analysis:`);
+      console.log(`  ${aiAnalysis}`);
+      console.log('');
+    }
     console.log(`  Stability : ${selectedVault.stability.toFixed(3)} / 1.0  (APY consistency over 30d)`);
     console.log(`  Trust     : ${selectedVault.trust.toFixed(2)}  (protocol credibility score)`);
     console.log(`  Risk      : ${riskLabel}`);
     console.log(`  Withdraw  : ${liquidLabel}`);
 
+    const costRatio      = grossYield > 0 ? (totalGasCost / grossYield) * 100 : 999;
+    const costRatioLabel = costRatio > 25 ? '❌ Very high' : costRatio > 10 ? '⚠️  High' : '✅ OK';
+
     console.log(`\n📈 Expected economics:`);
     console.log(`  Gross yield/yr : $${grossYield.toFixed(2)}`);
     console.log(`  Est. costs     : $${totalGasCost.toFixed(2)}`);
+    console.log(`  Cost ratio     : ${costRatio.toFixed(1)}%  ${costRatioLabel}`);
     console.log(`  Net yield/yr   : $${netYield.toFixed(2)}`);
     if (breakEvenDays !== null) {
       console.log(`  Break-even     : ${breakEvenDays} day${breakEvenDays === 1 ? '' : 's'}`);
+    }
+
+    // Warning if cost ratio is too high
+    if (costRatio > 25) {
+      console.log(`\n❌ Not recommended: gas costs are ${costRatio.toFixed(1)}% of expected yield.`);
+      const minRec1 = Math.max(50, Math.ceil(totalGasCost / (selectedVault.apy / 100) / 0.05));
+      console.log(`   Recommended minimum deposit: ~$${minRec1}`);
+    } else if (costRatio > 10) {
+      console.log(`\n⚠️  Warning: gas costs are ${costRatio.toFixed(1)}% of expected yield.`);
+      const minRec1 = Math.max(50, Math.ceil(totalGasCost / (selectedVault.apy / 100) / 0.05));
+      console.log(`   Recommended minimum deposit: ~$${minRec1}`);
     }
 
 
@@ -443,7 +533,9 @@ async function run(instruction, walletAddress) {
             depositPack:       candidate.vault.depositPacks?.[0]?.name || '',
           });
           recordPosition(candidate.vault, toChainId);
-          console.log('\n🎉 Consolidate + deposit complete! Stay Vaulthoric.');
+          console.log('\n🎉 Consolidate + deposit complete!');
+      console.log('\n🤖 Vaulthoric will monitor your position and notify you');
+      console.log('   if better yield opportunities appear. Stay Vaulthoric.');
           rl.close();
           return result;
         } catch (e) {
@@ -486,7 +578,9 @@ async function run(instruction, walletAddress) {
           depositPack:       candidate.vault.depositPacks?.[0]?.name || '',
         });
         recordPosition(candidate.vault, candidate.vault.chainId);
-        console.log('\n🎉 Deposit complete! Stay Vaulthoric.');
+        console.log('\n🎉 Deposit complete!');
+      console.log('\n🤖 Vaulthoric will monitor your position and notify you');
+      console.log('   if better yield opportunities appear. Stay Vaulthoric.');
         rl.close();
         return result;
       } catch (e) {
@@ -531,6 +625,8 @@ Examples:
   await run(instruction, walletAddress);
 }
 
-main().catch(console.error).finally(() => process.exit(0));
+if (require.main === module) {
+  main().catch(console.error).finally(() => process.exit(0));
+}
 
 module.exports = { run, parseInstruction };
