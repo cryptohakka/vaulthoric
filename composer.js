@@ -37,6 +37,16 @@ const ERC4626_ABI = [
 // LI.FI quoteのgas見積もりがこれ以上なら直接depositにフォールバック（USD）
 const GAS_FALLBACK_THRESHOLD_USD = 0.05;
 
+// USDC addresses（bridge後のdeposit用）
+const USDC_ADDRESSES = {
+  8453:   '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  42161:  '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+  1:      '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+  10:     '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85',
+  137:    '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+  143:    '0xf817257fed379853cDe0fa4F97AB987181B1E5Ea',
+};
+
 // quote取得
 async function getQuote({ fromChain, toChain, fromToken, toToken, fromAmount, fromAddress }) {
   const params = new URLSearchParams({
@@ -78,14 +88,23 @@ async function sendTx(signer, transactionRequest) {
   // EIP-1559: gasPriceとmaxFeePerGasは共存不可なのでgasPriceを削除
   delete transactionRequest.gasPrice;
 
-  // 常に現在のnetwork feeで上書き+20%バッファ（LI.FIのquoteはbaseFeeと競合しやすい）
+  // 常に現在のnetwork feeで上書き+20%バッファ
   const feeData = await signer.provider.getFeeData();
   if (feeData.maxFeePerGas) {
     transactionRequest.maxFeePerGas = (feeData.maxFeePerGas * 120n / 100n).toString();
     transactionRequest.maxPriorityFeePerGas = (
       feeData.maxPriorityFeePerGas ?? feeData.maxFeePerGas / 10n
     ).toString();
-    console.log(`⚡ Gas set to current fee +20%: $${transactionRequest.maxFeePerGas}`);
+    console.log(`⚡ Gas set to current fee +20%: ${transactionRequest.maxFeePerGas}`);
+  }
+
+  // estimateGasで実際のgasLimit取得+20%バッファ
+  try {
+    const estimated = await signer.estimateGas(transactionRequest);
+    transactionRequest.gasLimit = (estimated * 120n / 100n).toString();
+    console.log(`⚡ gasLimit estimated: ${estimated} → ${transactionRequest.gasLimit}`);
+  } catch(e) {
+    console.log(`  ⚠️  estimateGas failed, using LI.FI value: ${transactionRequest.gasLimit}`);
   }
 
   const tx = await signer.sendTransaction(transactionRequest);
@@ -144,6 +163,90 @@ async function _depositERC4626(signer, fromTokenAddress, vaultTokenAddress, amou
   return { tx, finalStatus: { status: 'DONE' } };
 }
 
+// PARTIAL後のリカバリ: toChainのUSDC残高確認 → 直接deposit
+async function _recoverPartial({ fromAddress, toChainId, vaultTokenAddress, pack }) {
+  const { getProviderWithFallback } = require('./tools');
+  const toUsdcAddress = USDC_ADDRESSES[toChainId];
+  if (!toUsdcAddress) {
+    console.log('  ⚠️  No USDC address for recovery, skipping');
+    return null;
+  }
+
+  console.log('\n🔄 PARTIAL detected — checking USDC balance on destination chain...');
+  // 少し待ってからon-chain確認（bridgeの完了に時間がかかる場合がある）
+  await new Promise(r => setTimeout(r, 5000));
+
+  const toProvider = await getProviderWithFallback(toChainId);
+  const toSigner = new ethers.Wallet(process.env.PRIVATE_KEY, toProvider);
+  const erc20 = new ethers.Contract(toUsdcAddress, ERC20_ABI, toProvider);
+  const bal = await erc20.balanceOf(fromAddress);
+
+  if (bal === 0n) {
+    console.log('  ⚠️  No USDC found on destination chain yet, manual deposit needed');
+    return null;
+  }
+
+  console.log(`  Found ${ethers.formatUnits(bal, 6)} USDC — proceeding with direct deposit`);
+
+  if (pack === 'aave-zaps' && AAVE_POOLS[toChainId]) {
+    return await _depositAave(toSigner, toUsdcAddress, toChainId, bal);
+  }
+  if (pack === 'morpho-zaps') {
+    return await _depositERC4626(toSigner, toUsdcAddress, vaultTokenAddress, bal);
+  }
+  console.log(`  ⚠️  No direct deposit support for pack="${pack}"`);
+  return null;
+}
+
+// 2段階cross-chain deposit: LI.FI bridgeのみ → toChainで直接deposit
+async function _depositCrossChain2Step({ signer, fromChainId, toChainId, fromTokenAddress, vaultTokenAddress, amountWei, pack }) {
+  const fromAddress = await signer.getAddress();
+  const toUsdcAddress = USDC_ADDRESSES[toChainId];
+  if (!toUsdcAddress) throw new Error(`No USDC address for chainId ${toChainId}`);
+
+  // ステップ1: LI.FI bridge USDC → toChain USDC
+  console.log(`\n🌉 Step 1: Bridging USDC from chain ${fromChainId} → chain ${toChainId}...`);
+  const bridgeQuote = await getQuote({
+    fromChain: fromChainId,
+    toChain: toChainId,
+    fromToken: fromTokenAddress,
+    toToken: toUsdcAddress,
+    fromAmount: amountWei,
+    fromAddress,
+  });
+
+  const bridgeGasUsd = parseFloat(bridgeQuote.estimate?.gasCosts?.[0]?.amountUSD || '0');
+  const bridgedAmount = bridgeQuote.estimate?.toAmount || amountWei;
+  console.log(`  Bridge gas: $${bridgeGasUsd} | Est. received: ${ethers.formatUnits(bridgedAmount, 6)} USDC`);
+
+  await ensureAllowance(
+    signer,
+    bridgeQuote.action.fromToken.address,
+    bridgeQuote.estimate.approvalAddress,
+    bridgeQuote.action.fromAmount
+  );
+
+  const bridgeTx = await sendTx(signer, bridgeQuote.transactionRequest);
+  const bridgeStatus = await pollStatus(bridgeTx.hash, fromChainId, toChainId);
+
+  if (bridgeStatus.status === 'FAILED') throw new Error('Bridge failed');
+  console.log(`✅ Bridge complete`);
+
+  // ステップ2: toChainのsignerでdirect deposit
+  console.log(`\n🏦 Step 2: Depositing to vault on chain ${toChainId}...`);
+  const { getProviderWithFallback } = require('./tools');
+  const toProvider = await getProviderWithFallback(toChainId);
+  const toSigner = new ethers.Wallet(process.env.PRIVATE_KEY, toProvider);
+
+  if (pack === 'aave-zaps' && AAVE_POOLS[toChainId]) {
+    return await _depositAave(toSigner, toUsdcAddress, toChainId, bridgedAmount);
+  }
+  if (pack === 'morpho-zaps') {
+    return await _depositERC4626(toSigner, toUsdcAddress, vaultTokenAddress, bridgedAmount);
+  }
+  throw new Error(`No direct deposit support for pack="${pack}" on cross-chain fallback`);
+}
+
 // メイン実行関数: fromToken → vault deposit
 async function depositToVault({ signer, fromChainId, toChainId, fromTokenAddress, vaultTokenAddress, amountWei, depositPack }) {
   const fromAddress = await signer.getAddress();
@@ -176,24 +279,33 @@ async function depositToVault({ signer, fromChainId, toChainId, fromTokenAddress
     console.log(`  ⚠️  LI.FI quote failed: ${e.message}`);
   }
 
-  // ステップ2: gasが高すぎる or quoteが取れなかった場合は直接depositへ
+  // ステップ2: gasが高すぎる or quoteが取れなかった場合はフォールバック
   const gasIsTooHigh = quoteGasUsd !== null && quoteGasUsd > GAS_FALLBACK_THRESHOLD_USD;
   const quoteFailed = quote === null;
 
-  if (isSameChain && (gasIsTooHigh || quoteFailed)) {
+  if (gasIsTooHigh || quoteFailed) {
     if (gasIsTooHigh) {
       console.log(`\n⚠️  LI.FI gas $${quoteGasUsd} exceeds $${GAS_FALLBACK_THRESHOLD_USD} — falling back to direct deposit`);
     }
-    if (pack === 'aave-zaps' && AAVE_POOLS[toChainId]) {
-      return await _depositAave(signer, fromTokenAddress, toChainId, amountWei);
-    }
-    if (pack === 'morpho-zaps') {
-      return await _depositERC4626(signer, fromTokenAddress, vaultTokenAddress, amountWei);
+
+    if (isSameChain) {
+      if (pack === 'aave-zaps' && AAVE_POOLS[toChainId]) {
+        return await _depositAave(signer, fromTokenAddress, toChainId, amountWei);
+      }
+      if (pack === 'morpho-zaps') {
+        return await _depositERC4626(signer, fromTokenAddress, vaultTokenAddress, amountWei);
+      }
+    } else {
+      console.log(`\n🔀 Cross-chain fallback: bridge → direct deposit`);
+      return await _depositCrossChain2Step({
+        signer, fromChainId, toChainId, fromTokenAddress,
+        vaultTokenAddress, amountWei, pack,
+      });
     }
     console.log(`  ⚠️  No direct deposit support for pack="${pack}", proceeding with LI.FI anyway`);
   }
 
-  // ステップ3: LI.FI Composer経由で実行
+  // ステップ3: LI.FI Composer経由で実行（1段階）
   if (!quote) {
     throw new Error('LI.FI quote unavailable and no direct deposit fallback');
   }
@@ -208,6 +320,13 @@ async function depositToVault({ signer, fromChainId, toChainId, fromTokenAddress
   const tx = await sendTx(signer, quote.transactionRequest);
   const finalStatus = await pollStatus(tx.hash, fromChainId, toChainId);
   console.log(`\n🏁 Final status: ${finalStatus.status}`);
+
+  // DONE (PARTIAL): bridgeは成功したがvault depositが未完 → リカバリ
+  if (finalStatus.status === 'DONE' && finalStatus.substatus === 'PARTIAL') {
+    console.log('\n⚠️  Bridge succeeded but vault deposit incomplete — attempting recovery...');
+    const recovered = await _recoverPartial({ fromAddress, toChainId, vaultTokenAddress, pack });
+    if (recovered) return recovered;
+  }
 
   return { tx, quote, finalStatus };
 }

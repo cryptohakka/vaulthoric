@@ -2,6 +2,12 @@ require('dotenv').config();
 
 // ethers.jsの内部RPCエラーログを抑制
 const { Writable } = require('stream');
+const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+process.stdout.write = (chunk, ...args) => {
+  const msg = chunk.toString();
+  if (msg.includes('JsonRpcProvider failed') || msg.includes('retry in 1s')) return true;
+  return originalStdoutWrite(chunk, ...args);
+};
 const originalStderrWrite = process.stderr.write.bind(process.stderr);
 process.stderr.write = (chunk, ...args) => {
   const msg = chunk.toString();
@@ -55,7 +61,7 @@ function recordPosition(vault, chainId) {
       protocol: vault.protocol,
       name: vault.name,
       symbol: vault.underlyingTokens?.[0]?.symbol || 'USDC',
-      decimals: 18, // ERC-4626はほぼ18、aTokenは6（withdraw.jsでon-chain確認）
+      decimals: 18,
       depositPack: vault.depositPacks?.[0]?.name || '',
       addedAt: new Date().toISOString(),
     });
@@ -82,11 +88,20 @@ Supported chains: ${chainList}
 Output format:
 {
   "asset": "USDC",
+  "fromChainId": null,
   "chainId": 42161,
   "minApy": 5.0,
   "amount": null,
   "mode": "balanced"
 }
+
+fromChainId rules:
+- "from Arbitrum", "my Arbitrum USDC", "using Base funds" → fromChainId: that chain's ID
+- If source chain not specified → fromChainId: null (will auto-detect from wallet)
+
+chainId rules:
+- "into Base vault", "on Optimism", "deposit to Arbitrum" → chainId: that chain's ID
+- If destination chain not specified → chainId: null (search all chains)
 
 Mode selection rules (choose exactly one):
 - "safe", "safest", "secure", "low risk", "conservative" → mode: "safest"
@@ -96,9 +111,7 @@ Mode selection rules (choose exactly one):
 
 minApy rules:
 - Extract explicit APY thresholds ("above 5%", "at least 3%", "minimum 7%") → minApy: number
-- If no APY threshold mentioned → minApy: null
-
-Note: minApy is a filter (minimum threshold), mode determines ranking within filtered results.`
+- If no APY threshold mentioned → minApy: null`
         },
         { role: 'user', content: instruction }
       ]
@@ -157,35 +170,57 @@ async function run(instruction, walletAddress) {
     let params;
     try {
       params = await parseInstruction(instruction);
-      console.log(`  Asset: ${params.asset || 'USDC'} | Chain: ${params.chainId ? getChainName(params.chainId) : 'any'} | Min APY: ${params.minApy || 'any'}% | Amount: ${params.amount ? '$' + params.amount : 'all'} | Mode: ${params.mode || 'balanced'}`);
+      console.log(`  Asset: ${params.asset || 'USDC'} | From: ${params.fromChainId ? getChainName(params.fromChainId) : 'auto'} | To: ${params.chainId ? getChainName(params.chainId) : 'any'} | Min APY: ${params.minApy || 'any'}% | Amount: ${params.amount ? '$' + params.amount : 'all'} | Mode: ${params.mode || 'balanced'}`);
     } catch (e) {
       console.log('  ⚠️  Could not parse instruction, using defaults');
-      params = { asset: 'USDC', chainId: null, minApy: null, amount: null, mode: 'balanced' };
+      params = { asset: 'USDC', fromChainId: null, chainId: null, minApy: null, amount: null, mode: 'balanced' };
     }
 
     const asset = params.asset || 'USDC';
 
     // ステップ2: 残高確認
+    // 優先順位:
+    // 1. fromChainId指定あり → そのチェーンのみ
+    // 2. fromChainId未指定 + chainId指定あり → 目的チェーンを先に確認、なければ全スキャン
+    // 3. 両方未指定 → 全スキャン
     console.log(`\n💰 Checking ${asset} balance...`);
     let balanceInfo = null;
 
-    if (params.chainId) {
-      balanceInfo = await checkBalance(params.chainId, walletAddress);
+    if (params.fromChainId) {
+      // ケース1: fromChain明示指定
+      balanceInfo = await checkBalance(params.fromChainId, walletAddress);
       if (balanceInfo && balanceInfo.usd > 0.01) {
-        console.log(`  ${getChainName(params.chainId)}: ${balanceInfo.usd.toFixed(4)} ${asset}`);
+        console.log(`  ${getChainName(params.fromChainId)}: ${balanceInfo.usd.toFixed(4)} ${asset}`);
       } else {
-        console.log(`  ❌ No ${asset} found on ${getChainName(params.chainId)}`);
+        console.log(`  ❌ No ${asset} found on ${getChainName(params.fromChainId)}`);
         rl.close();
         return;
       }
+    } else if (params.chainId) {
+      // ケース2: 目的チェーン指定あり → そのチェーンを先に確認
+      const b = await checkBalance(params.chainId, walletAddress);
+      if (b && b.usd > 0.01) {
+        // 目的チェーンに残高あり → 同チェーンdeposit
+        balanceInfo = b;
+        console.log(`  ${getChainName(params.chainId)}: ${b.usd.toFixed(4)} ${asset}`);
+      } else {
+        // 目的チェーンに残高なし → 全スキャンして最大残高チェーンを使う
+        console.log(`  ${getChainName(params.chainId)}: no balance — scanning all chains...`);
+        for (const chainId of getScanChainIds()) {
+          if (chainId === params.chainId) continue; // 既に確認済み
+          const b2 = await checkBalance(chainId, walletAddress);
+          if (b2 && b2.usd > 0.01) {
+            if (!balanceInfo || b2.usd > balanceInfo.usd) balanceInfo = b2;
+            console.log(`  ${getChainName(chainId).padEnd(12)}: ${b2.usd.toFixed(4)} ${asset}`);
+          }
+        }
+      }
     } else {
+      // ケース3: 全スキャン
       for (const chainId of getScanChainIds()) {
         const b = await checkBalance(chainId, walletAddress);
         if (b && b.usd > 0.01) {
-          if (!balanceInfo || b.usd > balanceInfo.usd) {
-            balanceInfo = b;
-            params.chainId = chainId;
-          }
+          if (!balanceInfo || b.usd > balanceInfo.usd) balanceInfo = b;
           console.log(`  ${getChainName(chainId).padEnd(12)}: ${b.usd.toFixed(4)} ${asset}`);
         }
       }
@@ -201,7 +236,7 @@ async function run(instruction, walletAddress) {
     const fromChainId = balanceInfo.chainId;
     console.log(`\n  Using: $${depositAmount.toFixed(2)} ${asset} from ${getChainName(fromChainId)}`);
 
-    // ステップ3: vault検索
+    // ステップ3: vault検索（chainIdは目的チェーン）
     console.log(`\n🔍 Searching vaults...`);
     const allVaults = await getVaults({ asset, minTvlUsd: 500000 });
 
@@ -323,8 +358,8 @@ Usage:
   node ask.js "<instruction>"
 
 Examples:
-  node ask.js "put my USDC into the safest vault above 5% APY on Arbitrum"
-  node ask.js "find the highest yield USDC vault on Base"
+  node ask.js "put my USDC from Arbitrum into highest yield vault on Base"
+  node ask.js "find the safest USDC vault above 5% APY on Arbitrum"
   node ask.js "deposit 100 USDC into a stable vault"
     `);
     return;

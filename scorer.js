@@ -5,6 +5,7 @@
 
 const MIN_TVL_USD = 1_000_000;
 const MIN_APY = 0.1;
+const MAX_APY = 100; // 100%超えは異常値として除外
 
 // プロトコル信頼スコア（LI.FI Earn対応プロトコル全11種）
 const PROTOCOL_TRUST = {
@@ -43,7 +44,7 @@ const GAS_COST_USD = {
 };
 
 // ブリッジコスト推定（USD）
-const BRIDGE_COST_USD = 0.5;
+const BRIDGE_COST_USD = 0.01;
 
 // APY安定性スコア（変動係数ベース、0〜1）
 function apyStability(vault) {
@@ -75,7 +76,7 @@ function penalties(vault) {
 // メインスコアリング
 function scoreVault(vault, amountUsd = 1000, fromChainId = null) {
   const apy = vault.analytics.apy.total;
-  if (!apy || apy < MIN_APY) return null;
+  if (!apy || apy < MIN_APY || apy > MAX_APY) return null;
 
   // LI.FI APIでdeposit/redeemが両方対応してるvaultのみ対象
   if (!vault.isTransactional) return null;
