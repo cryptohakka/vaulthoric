@@ -297,8 +297,32 @@ async function depositBestVault({ chainId, amountWei, wallet, mode = 'best' }) {
   const signer    = getSigner(chainId);
 
   for (const candidate of candidates.slice(0, 5)) {
+    const depositUsd    = parseFloat(ethers.formatUnits(amountWei, 6));
+    const grossYield    = depositUsd * (candidate.apy / 100);
+    const netYield      = grossYield - candidate.totalGasCost;
+    const breakEvenDays = netYield > 0 ? Math.ceil((candidate.totalGasCost / grossYield) * 365) : null;
+    const riskLabel     = candidate.trust >= 1.25 && candidate.stability >= 0.9 ? 'Low'
+                        : candidate.trust >= 1.1  && candidate.stability >= 0.7 ? 'Low-Medium'
+                        : candidate.trust >= 1.0                                 ? 'Medium'
+                        : 'Higher';
+    const liquidLabel   = candidate.vault.depositPacks?.[0]?.name?.includes('aave') ? 'Yes (instant)' : 'Yes';
+
     console.log(`\n  ${modeLabel} vault: ${candidate.vault.name} (${candidate.vault.protocol})`);
     console.log(`  APY: ${candidate.apy.toFixed(2)}% | Stability: ${candidate.stability.toFixed(3)} | Score: ${candidate.score.toFixed(2)}`);
+
+    console.log(`\n  💡 Why this vault?`);
+    console.log(`    Stability : ${candidate.stability.toFixed(3)} / 1.0  (APY consistency over 30d)`);
+    console.log(`    Trust     : ${candidate.trust.toFixed(2)}  (protocol credibility score)`);
+    console.log(`    Risk      : ${riskLabel}`);
+    console.log(`    Withdraw  : ${liquidLabel}`);
+
+    console.log(`\n  📈 Expected economics:`);
+    console.log(`    Gross yield/yr : $${grossYield.toFixed(2)}`);
+    console.log(`    Est. costs     : $${candidate.totalGasCost.toFixed(2)}`);
+    console.log(`    Net yield/yr   : $${netYield.toFixed(2)}`);
+    if (breakEvenDays !== null) {
+      console.log(`    Break-even     : ${breakEvenDays} day${breakEvenDays === 1 ? '' : 's'}`);
+    }
     try {
       const result = await depositToVault({
         signer,
@@ -434,4 +458,8 @@ async function main() {
   rl.close();
 }
 
-main().catch(e => { console.error('❌', e.message); process.exit(1); });
+if (require.main === module) {
+  main().catch(e => { console.error('❌', e.message); process.exit(1); });
+}
+
+module.exports = { bridgeAllParallel, getUsdcBalance, depositBestVault, getBridgeQuote };

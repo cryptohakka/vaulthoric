@@ -29,6 +29,7 @@ const BAL_ABI = [
   'function balanceOf(address) view returns (uint256)',
   'function decimals() view returns (uint8)',
   'function symbol() view returns (string)',
+  'function convertToAssets(uint256 shares) view returns (uint256 assets)',
 ];
 
 // ─── Position Scanner ─────────────────────────────────────────────────────────
@@ -46,9 +47,9 @@ async function scanPositions(walletAddress) {
 
   for (const v of saved) {
     try {
-      const provider  = await getProviderWithFallback(v.chainId);
-      const contract  = new ethers.Contract(v.address, BAL_ABI, provider);
-      const bal       = await contract.balanceOf(walletAddress);
+      const provider = await getProviderWithFallback(v.chainId);
+      const contract = new ethers.Contract(v.address, BAL_ABI, provider);
+      const bal      = await contract.balanceOf(walletAddress);
       if (bal === 0n) continue;
 
       let decimals = v.decimals || 18;
@@ -61,7 +62,15 @@ async function scanPositions(walletAddress) {
       const amount = parseFloat(ethers.formatUnits(bal, decimals));
       if (amount < 0.0001) continue;
 
-      console.log(`  ✅ ${v.protocol} ${v.name}: ${amount.toFixed(4)} ${symbol}`);
+      // Convert shares to underlying USDC for accurate USD display.
+      // Falls back to share count if convertToAssets is unavailable.
+      let valueUsd = amount;
+      try {
+        const assets = await contract.convertToAssets(bal);
+        valueUsd = parseFloat(ethers.formatUnits(assets, 6)); // USDC is 6 decimals
+      } catch {}
+
+      console.log(`  ✅ ${v.protocol} ${v.name}: ${amount.toFixed(4)} ${symbol} (~$${valueUsd.toFixed(2)})`);
       results.push({
         chainId:        v.chainId,
         network:        String(v.chainId),
@@ -71,7 +80,7 @@ async function scanPositions(walletAddress) {
         lpDecimals:     Number(decimals),
         lpBalance:      bal,
         amount,
-        valueUsd:       amount,
+        valueUsd,
         apy:            0,
         protocol:       v.protocol,
         vaultName:      v.name,
@@ -152,8 +161,9 @@ async function withdrawPosition(position, walletAddress) {
     if ((position.depositPack === 'aave-zaps' || position.depositPack === 'neverland-zaps') && AAVE_POOLS[position.chainId]) {
       console.log('\n🏦 Withdrawing from Aave directly...');
       const pool           = new ethers.Contract(AAVE_POOLS[position.chainId], AAVE_POOL_ABI, signer);
+      // Use valueUsd (underlying USDC amount) for Aave withdraw, not share count.
       const withdrawAmount = choice === '1'
-        ? ethers.parseUnits(position.amount.toFixed(6), 6)
+        ? ethers.parseUnits(position.valueUsd.toFixed(6), 6)
         : amountWei;
       const tx = await pool.withdraw(toToken, withdrawAmount, await signer.getAddress());
       console.log(`🔗 Tx hash: ${tx.hash}`);
@@ -165,11 +175,16 @@ async function withdrawPosition(position, walletAddress) {
     }
 
     // ERC-4626 redeem → LI.FI fallback on failure
+    // estimateGas first to avoid wasting gas on a doomed tx.
     try {
       console.log('\n🔄 Trying ERC-4626 redeem...');
-      const vault       = new ethers.Contract(position.vaultAddress, ERC4626_ABI, signer);
+      const vault        = new ethers.Contract(position.vaultAddress, ERC4626_ABI, signer);
       const redeemAmount = choice === '1' ? position.lpBalance : amountWei;
-      const tx = await vault.redeem(redeemAmount, await signer.getAddress(), await signer.getAddress());
+      const signerAddr   = await signer.getAddress();
+
+      await vault.redeem.estimateGas(redeemAmount, signerAddr, signerAddr);
+
+      const tx = await vault.redeem(redeemAmount, signerAddr, signerAddr);
       console.log(`🔗 Tx hash: ${tx.hash}`);
       const receipt = await tx.wait();
       console.log(`✅ Confirmed in block: ${receipt.blockNumber}`);
@@ -177,7 +192,7 @@ async function withdrawPosition(position, walletAddress) {
       console.log('\n🎉 Withdrawal complete! Stay Vaulthoric.');
       return;
     } catch (redeemErr) {
-      console.log(`  ⚠️  ERC-4626 redeem failed: ${redeemErr.message}`);
+      console.log(`  ⚠️  ERC-4626 redeem not available: ${redeemErr.message?.slice(0, 80)}`);
     }
 
     // LI.FI Composer fallback
@@ -190,7 +205,7 @@ async function withdrawPosition(position, walletAddress) {
       fromAmount:  amountWei.toString(),
       fromAddress: walletAddress,
       toAddress:   walletAddress,
-      slippage:    '0.03',
+      slippage:    '0.005',
     });
     const res   = await axios.get(`https://li.quest/v1/quote?${params}`, { headers: LIFI_HEADERS });
     const quote = res.data;
@@ -245,4 +260,4 @@ async function main() {
   await withdrawPosition(positions[idx], walletAddress);
 }
 
-main().catch(console.error);
+main().catch(console.error).finally(() => process.exit(0));

@@ -118,6 +118,41 @@ function filterVaults(ranked, { minApy, mode } = {}) {
   return filtered;
 }
 
+// ─── Candidate Proposal Display ──────────────────────────────────────────────
+
+function printCandidateProposal(candidate, depositUsd, fromChainId, asset) {
+  const grossYield    = depositUsd * (candidate.apy / 100);
+  const netYield      = grossYield - candidate.totalGasCost;
+  const breakEvenDays = netYield > 0 ? Math.ceil((candidate.totalGasCost / grossYield) * 365) : null;
+  const riskLabel     = candidate.trust >= 1.25 && candidate.stability >= 0.9 ? 'Low'
+                      : candidate.trust >= 1.1  && candidate.stability >= 0.7 ? 'Low-Medium'
+                      : candidate.trust >= 1.0                                 ? 'Medium'
+                      : 'Higher';
+  const liquidLabel   = candidate.vault.depositPacks?.[0]?.name?.includes('aave') ? 'Yes (instant)' : 'Yes';
+  const needsBridge   = fromChainId !== candidate.vault.chainId;
+
+  console.log(`\n📋 Next Vault Proposal:`);
+  const addr1 = candidate.vault.address?.slice(-4) || '????';
+  console.log(`  Vault     : ${candidate.vault.name} (${candidate.vault.protocol}) [0x…${addr1}]`);
+  console.log(`  Network   : ${candidate.vault.network} (chain=${candidate.vault.chainId})`);
+  console.log(`  APY       : ${candidate.apy}% → Net APY: ${candidate.netApy}%`);
+  console.log(`  TVL       : $${(candidate.tvlUsd / 1e6).toFixed(1)}M`);
+  console.log(`  Deposit   : $${depositUsd.toFixed(2)} ${asset} from ${getChainName(fromChainId)}`);
+  console.log(`  Gas est.  : $${candidate.totalGasCost.toFixed(2)}${needsBridge ? ' (incl. bridge)' : ''}`);
+  console.log(`\n💡 Why this vault?`);
+  console.log(`  Stability : ${candidate.stability.toFixed(3)} / 1.0  (APY consistency over 30d)`);
+  console.log(`  Trust     : ${candidate.trust.toFixed(2)}  (protocol credibility score)`);
+  console.log(`  Risk      : ${riskLabel}`);
+  console.log(`  Withdraw  : ${liquidLabel}`);
+  console.log(`\n📈 Expected economics:`);
+  console.log(`  Gross yield/yr : $${grossYield.toFixed(2)}`);
+  console.log(`  Est. costs     : $${candidate.totalGasCost.toFixed(2)}`);
+  console.log(`  Net yield/yr   : $${netYield.toFixed(2)}`);
+  if (breakEvenDays !== null) {
+    console.log(`  Break-even     : ${breakEvenDays} day${breakEvenDays === 1 ? '' : 's'}`);
+  }
+}
+
 // ─── Main Flow ────────────────────────────────────────────────────────────────
 
 async function run(instruction, walletAddress) {
@@ -143,54 +178,78 @@ async function run(instruction, walletAddress) {
 
     // Step 2: Resolve balance
     // Priority:
-    //   1. fromChainId specified → use that chain only
-    //   2. chainId specified, no fromChainId → check destination first, then scan all
-    //   3. Neither specified → scan all chains
+    //   1. fromChainId specified -> use that chain only, no selection prompt
+    //   2. Otherwise -> scan all relevant chains, prompt user to pick source
     console.log(`\n💰 Checking ${asset} balance...`);
-    let balanceInfo = null;
+    let allBalances = [];
 
     if (params.fromChainId) {
-      balanceInfo = await checkBalance(params.fromChainId, walletAddress);
-      if (balanceInfo && balanceInfo.usd > 0.01) {
-        console.log(`  ${getChainName(params.fromChainId)}: ${balanceInfo.usd.toFixed(4)} ${asset}`);
+      const b = await checkBalance(params.fromChainId, walletAddress);
+      if (b && b.usd > 0.01) {
+        allBalances = [b];
+        console.log(`  ${getChainName(params.fromChainId)}: ${b.usd.toFixed(4)} ${asset}`);
       } else {
         console.log(`  ❌ No ${asset} found on ${getChainName(params.fromChainId)}`);
         rl.close(); return;
       }
-    } else if (params.chainId) {
-      const b = await checkBalance(params.chainId, walletAddress);
-      if (b && b.usd > 0.01) {
-        balanceInfo = b;
-        console.log(`  ${getChainName(params.chainId)}: ${b.usd.toFixed(4)} ${asset}`);
-      } else {
-        console.log(`  ${getChainName(params.chainId)}: no balance — scanning all chains...`);
-        for (const chainId of getScanChainIds()) {
-          if (chainId === params.chainId) continue;
-          const b2 = await checkBalance(chainId, walletAddress);
-          if (b2 && b2.usd > 0.01) {
-            if (!balanceInfo || b2.usd > balanceInfo.usd) balanceInfo = b2;
-            console.log(`  ${getChainName(chainId).padEnd(12)}: ${b2.usd.toFixed(4)} ${asset}`);
-          }
-        }
-      }
     } else {
-      for (const chainId of getScanChainIds()) {
+      const scanIds = getScanChainIds();
+      const ordered = params.chainId
+        ? [params.chainId, ...scanIds.filter(id => id !== params.chainId)]
+        : scanIds;
+
+      for (const chainId of ordered) {
         const b = await checkBalance(chainId, walletAddress);
         if (b && b.usd > 0.01) {
-          if (!balanceInfo || b.usd > balanceInfo.usd) balanceInfo = b;
+          allBalances.push(b);
           console.log(`  ${getChainName(chainId).padEnd(12)}: ${b.usd.toFixed(4)} ${asset}`);
         }
       }
     }
 
-    if (!balanceInfo || balanceInfo.usd < 0.01) {
+    if (allBalances.length === 0) {
       console.log(`\n❌ No ${asset} balance found. Cannot proceed.`);
       rl.close(); return;
     }
 
+    // Step 2b: Source selection (when multiple chains found)
+    let balanceInfo    = null;
+    let consolidateAll = false;
+
+    if (allBalances.length === 1 || params.fromChainId) {
+      balanceInfo = allBalances[0];
+    } else {
+      const totalUsd = allBalances.reduce((s, b) => s + b.usd, 0);
+      console.log(`\n  Select source:`);
+      allBalances.forEach((b, i) => {
+        console.log(`    ${i + 1}. ${getChainName(b.chainId).padEnd(12)} ${b.usd.toFixed(4)} ${asset}`);
+      });
+      console.log(`    ${allBalances.length + 1}. Consolidate all -> bridge everything to target chain ($${totalUsd.toFixed(2)} total)`);
+      console.log(`    Enter = largest (${getChainName(allBalances[0].chainId)})`);
+
+      const pick = await prompt(rl, '\n  Select (number or Enter): ');
+
+      if (pick === '') {
+        balanceInfo = allBalances[0];
+      } else if (parseInt(pick) === allBalances.length + 1) {
+        consolidateAll = true;
+        balanceInfo    = { usd: totalUsd, chainId: allBalances[0].chainId };
+      } else {
+        const idx = parseInt(pick) - 1;
+        if (isNaN(idx) || idx < 0 || idx >= allBalances.length) {
+          console.log('❌ Invalid selection.'); rl.close(); return;
+        }
+        balanceInfo = allBalances[idx];
+      }
+    }
+
+    console.log(consolidateAll
+      ? `\n  Consolidating all chains -> target chain`
+      : `\n  Using: $${balanceInfo.usd.toFixed(2)} ${asset} from ${getChainName(balanceInfo.chainId)}`
+    );
+
     const depositAmount = params.amount ? Math.min(params.amount, balanceInfo.usd) : balanceInfo.usd;
     const fromChainId   = balanceInfo.chainId;
-    console.log(`\n  Using: $${depositAmount.toFixed(2)} ${asset} from ${getChainName(fromChainId)}`);
 
     // Step 3: Search vaults
     console.log(`\n🔍 Searching vaults...`);
@@ -247,16 +306,84 @@ async function run(instruction, walletAddress) {
     }
 
     // Step 5: Present proposal
-    const needsBridge = fromChainId !== selectedVault.vault.chainId;
+    const toChainIdStep5 = selectedVault.vault.chainId;
+    const needsBridge    = consolidateAll || fromChainId !== toChainIdStep5;
+
+    // For consolidateAll: fetch real bridge quotes for accurate cost/time estimate
+    let totalGasCost = selectedVault.totalGasCost;
+    let bridgeQuotes = [];
+
+    if (consolidateAll) {
+      const { getBridgeQuote } = require('./consolidate');
+      const toBridge = allBalances
+        .filter(b => b.chainId !== toChainIdStep5)
+        .map(b => ({ ...b, name: getChainName(b.chainId), raw: b.balance, amount: b.usd }));
+      console.log(`\n📡 Fetching bridge quotes for estimate...`);
+      bridgeQuotes = await Promise.all(
+        toBridge.map(async (b) => {
+          try {
+            const q       = await getBridgeQuote({ fromChainId: b.chainId, toChainId: toChainIdStep5, amountWei: b.balance, wallet: walletAddress });
+            const estOut  = parseFloat(ethers.formatUnits(q.estimate.toAmount, q.action.toToken.decimals));
+            const gasCost = parseFloat(q.estimate.gasCosts?.[0]?.amountUSD || '0');
+            const dur     = q.estimate.executionDuration ? Math.ceil(q.estimate.executionDuration / 60) : null;
+            return { name: getChainName(b.chainId), amount: b.usd, estOut, gasCost, dur, error: null };
+          } catch (e) {
+            return { name: getChainName(b.chainId), amount: b.usd, estOut: 0, gasCost: 0, dur: null, error: e.message };
+          }
+        })
+      );
+      totalGasCost += bridgeQuotes.reduce((s, q) => s + q.gasCost, 0);
+    }
+
+    const grossYield    = depositAmount * (selectedVault.apy / 100);
+    const netYield      = grossYield - totalGasCost;
+    const breakEvenDays = netYield > 0 ? Math.ceil((totalGasCost / grossYield) * 365) : null;
+    const riskLabel     = selectedVault.trust >= 1.25 && selectedVault.stability >= 0.9 ? 'Low'
+                        : selectedVault.trust >= 1.1  && selectedVault.stability >= 0.7 ? 'Low-Medium'
+                        : selectedVault.trust >= 1.0                                    ? 'Medium'
+                        : 'Higher';
+    const liquidLabel   = selectedVault.vault.depositPacks?.[0]?.name?.includes('aave') ? 'Yes (instant)' : 'Yes';
+
     console.log(`\n📋 Vault Proposal:`);
-    console.log(`  Vault     : ${selectedVault.vault.name} (${selectedVault.vault.protocol})`);
-    console.log(`  Network   : ${selectedVault.vault.network} (chain=${selectedVault.vault.chainId})`);
+    const addrSuffix = selectedVault.vault.address?.slice(-4) || '????';
+    console.log(`  Vault     : ${selectedVault.vault.name} (${selectedVault.vault.protocol}) [0x…${addrSuffix}]`);
+    console.log(`  Network   : ${selectedVault.vault.network} (chain=${toChainIdStep5})`);
     console.log(`  APY       : ${selectedVault.apy}% → Net APY: ${selectedVault.netApy}%`);
-    console.log(`  Stability : ${selectedVault.stability} | Trust: ${selectedVault.trust}`);
     console.log(`  TVL       : $${(selectedVault.tvlUsd / 1e6).toFixed(1)}M`);
-    console.log(`  Deposit   : $${depositAmount.toFixed(2)} ${asset} from ${getChainName(fromChainId)}`);
-    console.log(`  Gas est.  : $${selectedVault.totalGasCost.toFixed(2)}${needsBridge ? ' (incl. bridge)' : ''}`);
-    console.log(`  Net yield : $${selectedVault.netYield.toFixed(2)}/year`);
+    console.log(`  Deposit   : $${depositAmount.toFixed(2)} ${asset}${consolidateAll ? ' (all chains combined)' : ` from ${getChainName(fromChainId)}`}`);
+
+    if (consolidateAll && bridgeQuotes.length > 0) {
+      const maxDur = Math.max(...bridgeQuotes.filter(q => q.dur).map(q => q.dur));
+      console.log(`\n📦 Bridge plan:`);
+      bridgeQuotes.forEach(q => {
+        if (q.error) {
+          console.log(`  • ${q.name.padEnd(12)}: ❌ quote failed`);
+        } else {
+          const gas = q.gasCost < 0.001 ? q.gasCost.toFixed(4) : q.gasCost.toFixed(3);
+          const dur = q.dur ? `~${q.dur} min` : '?';
+          console.log(`  • ${q.name.padEnd(12)}: ${q.amount.toFixed(4)} USDC  (est. out: ${q.estOut.toFixed(4)}, gas: $${gas}, ⏱️  ${dur})`);
+        }
+      });
+      if (maxDur) console.log(`  ⏱️  Est. total wait (parallel): ~${maxDur} min`);
+      console.log(`  Gas total : $${totalGasCost.toFixed(3)} (bridges + deposit)`);
+    } else {
+      console.log(`  Gas est.  : $${totalGasCost.toFixed(2)}${needsBridge ? ' (incl. bridge)' : ''}`);
+    }
+
+    console.log(`\n💡 Why this vault?`);
+    console.log(`  Stability : ${selectedVault.stability.toFixed(3)} / 1.0  (APY consistency over 30d)`);
+    console.log(`  Trust     : ${selectedVault.trust.toFixed(2)}  (protocol credibility score)`);
+    console.log(`  Risk      : ${riskLabel}`);
+    console.log(`  Withdraw  : ${liquidLabel}`);
+
+    console.log(`\n📈 Expected economics:`);
+    console.log(`  Gross yield/yr : $${grossYield.toFixed(2)}`);
+    console.log(`  Est. costs     : $${totalGasCost.toFixed(2)}`);
+    console.log(`  Net yield/yr   : $${netYield.toFixed(2)}`);
+    if (breakEvenDays !== null) {
+      console.log(`  Break-even     : ${breakEvenDays} day${breakEvenDays === 1 ? '' : 's'}`);
+    }
+
 
     // Step 6: Confirm
     const confirm = await prompt(rl, '\n✅ Proceed with deposit? (y/n): ');
@@ -270,24 +397,108 @@ async function run(instruction, walletAddress) {
     const pk = process.env.PRIVATE_KEY;
     if (!pk) throw new Error('PRIVATE_KEY not set');
 
+    const toChainId = selectedVault.vault.chainId;
+
+    if (consolidateAll) {
+      // Bridge all chains to target, then deposit
+      const { bridgeAllParallel, depositBestVault, getUsdcBalance } = require('./consolidate');
+      const toBridge = allBalances
+        .filter(b => b.chainId !== toChainId)
+        .map(b => ({ ...b, name: getChainName(b.chainId), raw: b.balance, amount: b.usd }));
+      if (toBridge.length > 0) {
+        await bridgeAllParallel({ sources: toBridge, toChainId, wallet: walletAddress });
+      }
+      console.log(`\n🔄 Checking final balance on ${getChainName(toChainId)}...`);
+      await new Promise(r => setTimeout(r, 3000));
+      const finalBal = await getUsdcBalance(toChainId, walletAddress);
+      if (finalBal.amount < 0.01) {
+        console.log('⚠️  Balance too low or bridge still pending.');
+        rl.close(); return;
+      }
+      const finalWei = ethers.parseUnits(finalBal.amount.toFixed(6), finalBal.decimals);
+      const provider = await getProviderWithFallback(toChainId);
+      const signer   = new ethers.Wallet(pk, provider);
+
+      // Try selected vault first, then confirm + fall back on failure.
+      const candidates = [selectedVault, ...filtered.slice(1, 4)].filter(Boolean);
+
+      for (const candidate of candidates) {
+        const isFirst = candidate === selectedVault;
+
+        if (!isFirst) {
+          printCandidateProposal(candidate, depositAmount, fromChainId, asset);
+          const ans = await prompt(rl, '\n✅ Proceed with this vault? (y/n/q): ');
+          if (ans.toLowerCase() === 'q') { console.log('\n❌ Cancelled.'); rl.close(); return; }
+          if (ans.toLowerCase() !== 'y') { console.log('  Skipping...'); continue; }
+        }
+
+        try {
+          const result = await depositToVault({
+            signer,
+            fromChainId:       toChainId,
+            toChainId,
+            fromTokenAddress:  finalBal.usdc,
+            vaultTokenAddress: candidate.vault.address,
+            amountWei:         finalWei.toString(),
+            depositPack:       candidate.vault.depositPacks?.[0]?.name || '',
+          });
+          recordPosition(candidate.vault, toChainId);
+          console.log('\n🎉 Consolidate + deposit complete! Stay Vaulthoric.');
+          rl.close();
+          return result;
+        } catch (e) {
+          console.log(`  ⚠️  ${candidate.vault.name} failed: ${e.message?.slice(0, 80)}`);
+          if (candidates.indexOf(candidate) < candidates.length - 1) {
+            console.log('  Next candidate available...');
+          }
+        }
+      }
+      console.log('\n❌ All vault candidates failed.');
+      rl.close();
+      return;
+    }
+
     const provider  = await getProviderWithFallback(fromChainId);
     const signer    = new ethers.Wallet(pk, provider);
     const amountWei = ethers.parseUnits(depositAmount.toFixed(6), balanceInfo.decimals);
 
-    const result = await depositToVault({
-      signer,
-      fromChainId,
-      toChainId:          selectedVault.vault.chainId,
-      fromTokenAddress:   balanceInfo.tokenAddress,
-      vaultTokenAddress:  selectedVault.vault.address,
-      amountWei:          amountWei.toString(),
-      depositPack:        selectedVault.vault.depositPacks?.[0]?.name || '',
-    });
+    // Try selected vault first, then confirm + fall back on failure.
+    const candidates = [selectedVault, ...filtered.slice(1, 4)].filter(Boolean);
 
-    recordPosition(selectedVault.vault, selectedVault.vault.chainId);
-    console.log('\n🎉 Deposit complete! Stay Vaulthoric.');
+    for (const candidate of candidates) {
+      const isFirst = candidate === selectedVault;
+
+      if (!isFirst) {
+        printCandidateProposal(candidate, depositAmount, fromChainId, asset);
+        const ans = await prompt(rl, '\n✅ Proceed with this vault? (y/n/q): ');
+        if (ans.toLowerCase() === 'q') { console.log('\n❌ Cancelled.'); rl.close(); return; }
+        if (ans.toLowerCase() !== 'y') { console.log('  Skipping...'); continue; }
+      }
+
+      try {
+        const result = await depositToVault({
+          signer,
+          fromChainId,
+          toChainId:         candidate.vault.chainId,
+          fromTokenAddress:  balanceInfo.tokenAddress,
+          vaultTokenAddress: candidate.vault.address,
+          amountWei:         amountWei.toString(),
+          depositPack:       candidate.vault.depositPacks?.[0]?.name || '',
+        });
+        recordPosition(candidate.vault, candidate.vault.chainId);
+        console.log('\n🎉 Deposit complete! Stay Vaulthoric.');
+        rl.close();
+        return result;
+      } catch (e) {
+        console.log(`  ⚠️  ${candidate.vault.name} failed: ${e.message?.slice(0, 80)}`);
+        if (candidates.indexOf(candidate) < candidates.length - 1) {
+          console.log('  Next candidate available...');
+        }
+      }
+    }
+
+    console.log('\n❌ All vault candidates failed.');
     rl.close();
-    return result;
 
   } catch (e) {
     console.error('\n❌ Error:', e.message);
@@ -320,6 +531,6 @@ Examples:
   await run(instruction, walletAddress);
 }
 
-main().catch(console.error);
+main().catch(console.error).finally(() => process.exit(0));
 
 module.exports = { run, parseInstruction };

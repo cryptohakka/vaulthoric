@@ -23,7 +23,7 @@ const GAS_FALLBACK_THRESHOLD_USD = 0.05;
 
 // ─── Quote ───────────────────────────────────────────────────────────────────
 
-async function getQuote({ fromChain, toChain, fromToken, toToken, fromAmount, fromAddress }) {
+async function getQuote({ fromChain, toChain, fromToken, toToken, fromAmount, fromAddress, slippage = '0.005' }) {
   const params = new URLSearchParams({
     fromChain,
     toChain,
@@ -32,6 +32,7 @@ async function getQuote({ fromChain, toChain, fromToken, toToken, fromAmount, fr
     fromAmount: fromAmount.toString(),
     fromAddress,
     toAddress: fromAddress,
+    slippage,
   });
   const res = await axios.get(`${LIFI_BASE}/v1/quote?${params}`, { headers: HEADERS });
   return res.data;
@@ -218,28 +219,57 @@ async function _depositCrossChain2Step({ signer, fromChainId, toChainId, fromTok
 }
 
 // ─── Main Entry Point ─────────────────────────────────────────────────────────
+// Routing priority:
+//   1. Known packs (morpho-zaps, aave-zaps, neverland-zaps) → always direct deposit
+//      This avoids LI.FI routing vault share tokens through DEX swaps.
+//   2. Cross-chain → LI.FI bridge to USDC on destination, then direct deposit
+//   3. Unknown pack, same-chain → LI.FI quote with 0.5% slippage guard
 
 async function depositToVault({ signer, fromChainId, toChainId, fromTokenAddress, vaultTokenAddress, amountWei, depositPack }) {
   const fromAddress = await signer.getAddress();
   const isSameChain = fromChainId === toChainId;
   const pack        = depositPack || '';
 
-  console.log(`\n🔍 Getting LI.FI quote...`);
+  console.log(`\n🏦 Depositing to vault...`);
   console.log(`  From: chain=${fromChainId} token=${fromTokenAddress}`);
   console.log(`  To:   chain=${toChainId} vault=${vaultTokenAddress}`);
-  console.log(`  Amount: ${amountWei}`);
+  console.log(`  Pack: ${pack || '(unknown)'} | Amount: ${amountWei}`);
 
-  let quote        = null;
-  let quoteGasUsd  = null;
+  // ── Priority 1: Known packs → direct deposit (never use LI.FI for vault tokens) ──
+  if (isSameChain) {
+    if ((pack === 'aave-zaps' || pack === 'neverland-zaps') && AAVE_POOLS[toChainId]) {
+      return await _depositAave(signer, fromTokenAddress, toChainId, amountWei);
+    }
+    if (pack === 'morpho-zaps') {
+      return await _depositERC4626(signer, fromTokenAddress, vaultTokenAddress, amountWei);
+    }
+  }
+
+  // ── Priority 2: Cross-chain → LI.FI bridge to USDC, then direct deposit ──
+  if (!isSameChain) {
+    if (pack === 'aave-zaps' || pack === 'neverland-zaps' || pack === 'morpho-zaps') {
+      console.log(`\n🔀 Cross-chain: bridge → direct deposit`);
+      return await _depositCrossChain2Step({
+        signer, fromChainId, toChainId, fromTokenAddress,
+        vaultTokenAddress, amountWei, pack,
+      });
+    }
+  }
+
+  // ── Priority 3: Unknown pack → LI.FI Composer with slippage guard ──
+  console.log(`\n🔍 Getting LI.FI quote (slippage: 0.5%)...`);
+  let quote       = null;
+  let quoteGasUsd = null;
 
   try {
     quote = await getQuote({
-      fromChain:   fromChainId,
-      toChain:     toChainId,
-      fromToken:   fromTokenAddress,
-      toToken:     vaultTokenAddress,
-      fromAmount:  amountWei,
+      fromChain:  fromChainId,
+      toChain:    toChainId,
+      fromToken:  fromTokenAddress,
+      toToken:    vaultTokenAddress,
+      fromAmount: amountWei,
       fromAddress,
+      slippage:   '0.005',
     });
     quoteGasUsd = parseFloat(quote.estimate?.gasCosts?.[0]?.amountUSD || '0');
     console.log(`\n💡 Quote received:`);
@@ -249,33 +279,8 @@ async function depositToVault({ signer, fromChainId, toChainId, fromTokenAddress
     console.log(`  ⚠️  LI.FI quote failed: ${e.message}`);
   }
 
-  const gasIsTooHigh = quoteGasUsd !== null && quoteGasUsd > GAS_FALLBACK_THRESHOLD_USD;
-  const quoteFailed  = quote === null;
-
-  if (gasIsTooHigh || quoteFailed) {
-    if (gasIsTooHigh) {
-      console.log(`\n⚠️  LI.FI gas $${quoteGasUsd} > $${GAS_FALLBACK_THRESHOLD_USD} — falling back to direct deposit`);
-    }
-
-    if (isSameChain) {
-      if (pack === 'aave-zaps' && AAVE_POOLS[toChainId]) {
-        return await _depositAave(signer, fromTokenAddress, toChainId, amountWei);
-      }
-      if (pack === 'morpho-zaps') {
-        return await _depositERC4626(signer, fromTokenAddress, vaultTokenAddress, amountWei);
-      }
-    } else {
-      console.log('\n🔀 Cross-chain fallback: bridge → direct deposit');
-      return await _depositCrossChain2Step({
-        signer, fromChainId, toChainId, fromTokenAddress,
-        vaultTokenAddress, amountWei, pack,
-      });
-    }
-    console.log(`  ⚠️  No direct deposit support for pack="${pack}", proceeding with LI.FI`);
-  }
-
   if (!quote) {
-    throw new Error('LI.FI quote unavailable and no direct deposit fallback');
+    throw new Error(`LI.FI quote unavailable for pack="${pack}" and no direct deposit fallback`);
   }
 
   await ensureAllowance(
