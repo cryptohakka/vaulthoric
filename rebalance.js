@@ -101,6 +101,7 @@ async function main() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
   const instruction = process.argv[2] || null;
+  const isAuto      = process.argv.includes('--auto');
   let autoFrom = null;
   let autoTo   = null;
 
@@ -198,9 +199,13 @@ async function main() {
   console.log(`  Gain : +${improvement.toFixed(2)}% APY`);
   console.log(`  Value: ~$${position.valueUsd.toFixed(2)}`);
 
-  const confirm = await prompt(rl, '\n✅ Proceed with rebalance? (y/n): ');
-  if (confirm.toLowerCase() !== 'y') {
-    console.log('\n❌ Cancelled.'); rl.close(); return;
+  if (!isAuto) {
+    const confirm = await prompt(rl, '\n✅ Proceed with rebalance? (y/n): ');
+    if (confirm.toLowerCase() !== 'y') {
+      console.log('\n❌ Cancelled.'); rl.close(); return;
+    }
+  } else {
+    console.log('\n🤖 Auto-rebalance: proceeding automatically...');
   }
 
   // Step 3: Withdraw

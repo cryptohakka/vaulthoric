@@ -18,7 +18,9 @@ const {
 
 suppressRpcNoise();
 
+const { execSync }       = require('child_process');
 const WEBHOOK_URL        = process.env.DISCORD_WEBHOOK_URL;
+const AUTO_REBALANCE     = process.env.AUTO_REBALANCE === 'true';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL   = process.env.OPENROUTER_MODEL || 'google/gemini-flash-1.5';
 const WALLET             = new ethers.Wallet(process.env.PRIVATE_KEY).address;
@@ -190,6 +192,32 @@ async function main() {
 
     await notify(embed);
     console.log(`\n📨 Discord notification sent for ${pos.name}`);
+
+    // Auto-rebalance if enabled
+    if (AUTO_REBALANCE) {
+      console.log(`\n🔄 AUTO_REBALANCE=true — executing rebalance...`);
+      try {
+        execSync(
+          `node ${__dirname}/rebalance.js "${pos.name} to ${best.vault.name}" --auto`,
+          { stdio: 'inherit', cwd: __dirname }
+        );
+        await notify({
+          title:       '✅ Vaulthoric — Auto-Rebalance Complete',
+          color:       0x00c853,
+          description: `Successfully moved **${pos.name}** → **${best.vault.name}**
+New APY: ${best.apy.toFixed(2)}%`,
+          footer:      { text: `Vaulthoric Monitor • ${new Date().toUTCString()}` },
+        });
+      } catch (e) {
+        console.error(`  ❌ Auto-rebalance failed: ${e.message?.slice(0, 80)}`);
+        await notify({
+          title:       '❌ Vaulthoric — Auto-Rebalance Failed',
+          color:       0xff1744,
+          description: `Could not rebalance **${pos.name}**. Please run manually:\n\`node rebalance.js "${pos.name} to ${best.vault.name}"\``,
+          footer:      { text: `Vaulthoric Monitor • ${new Date().toUTCString()}` },
+        });
+      }
+    }
   }
 }
 
