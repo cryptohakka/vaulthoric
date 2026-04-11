@@ -1,12 +1,17 @@
 {
   "name": "vaulthoric",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Risk-adjusted DeFi yield optimizer with natural language interface",
+  "main": "agent.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "scan":        "node agent.js scan",
+    "suggest":     "node agent.js suggest",
+    "allocate":    "node agent.js allocate",
+    "ask":         "node ask.js",
+    "withdraw":    "node withdraw.js",
+    "consolidate": "node consolidate.js"
   },
-  "keywords": [],
+  "keywords": ["defi", "yield", "lifi", "usdc", "vault"],
   "author": "",
   "license": "ISC",
   "type": "commonjs",

@@ -1,48 +1,52 @@
-require('dotenv').config();
-const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-process.stdout.write = (chunk, ...args) => {
-  const msg = chunk.toString();
-  if (msg.includes('JsonRpcProvider failed') || msg.includes('retry in 1s')) return true;
-  return originalStdoutWrite(chunk, ...args);
-};
-const originalStderrWrite = process.stderr.write.bind(process.stderr);
-process.stderr.write = (chunk, ...args) => {
-  const msg = chunk.toString();
-  if (msg.includes('JsonRpcProvider failed') || msg.includes('retry in 1s')) return true;
-  return originalStderrWrite(chunk, ...args);
-};
+// Vaulthoric — Consolidate
+// Scans all chains for idle USDC, bridges to a target chain in parallel, and
+// optionally deposits into the best vault.
 
-const fs = require('fs');
-const path = require('path');
-const { ethers } = require('ethers');
+require('dotenv').config();
+
 const readline = require('readline');
-const axios = require('axios');
-const { getVaults } = require('./earn');
+const axios    = require('axios');
+const { ethers } = require('ethers');
+const { getVaults }  = require('./earn');
 const { rankVaults } = require('./scorer');
+const { depositToVault } = require('./composer');
 const {
+  ERC20_ABI,
   CHAINS,
   getUsdcAddress,
   getProviderWithFallback,
   getScanChainIds,
   getChainName,
+  recordPosition,
+  suppressRpcNoise,
 } = require('./tools');
+const { ensureAllowance, pollStatus } = require('./composer');
 
-const ERC20_ABI = [
-  'function balanceOf(address) view returns (uint256)',
-  'function decimals() view returns (uint8)',
-  'function approve(address,uint256) returns (bool)',
-  'function allowance(address,address) view returns (uint256)',
-];
+suppressRpcNoise();
 
 const LIFI_API = 'https://li.quest/v1';
 const MIN_USD  = 0.5;
+const POLL_MAX = 120; // 10 min max per bridge
 const POLL_MS  = 5000;
-const POLL_MAX = 60;
-const POSITIONS_FILE = path.join(__dirname, 'positions.json');
 
 function prompt(rl, q) {
   return new Promise(r => rl.question(q, r));
 }
+
+function fmtDuration(seconds) {
+  if (!seconds) return '?';
+  const m = Math.ceil(seconds / 60);
+  return m < 1 ? '<1 min' : `~${m} min`;
+}
+
+function fmtGas(usd) {
+  if (usd === 0) return '$0';
+  if (usd < 0.001) return `$${usd.toFixed(4)}`;
+  if (usd < 0.01)  return `$${usd.toFixed(3)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+// ─── Signer ───────────────────────────────────────────────────────────────────
 
 function getSigner(chainId) {
   const rpc = CHAINS[chainId]?.rpcs?.[0];
@@ -50,65 +54,20 @@ function getSigner(chainId) {
   return new ethers.Wallet(process.env.PRIVATE_KEY, new ethers.JsonRpcProvider(rpc));
 }
 
-function recordPosition(vault, chainId) {
-  let positions = [];
-  try { positions = JSON.parse(fs.readFileSync(POSITIONS_FILE, 'utf8')); } catch {}
-  const key = `${chainId}-${vault.address.toLowerCase()}`;
-  if (!positions.find(p => `${p.chainId}-${p.address.toLowerCase()}` === key)) {
-    positions.push({
-      address: vault.address,
-      chainId,
-      protocol: vault.protocol,
-      name: vault.name,
-      symbol: vault.underlyingTokens?.[0]?.symbol || 'USDC',
-      decimals: 18,
-      depositPack: vault.depositPacks?.[0]?.name || '',
-      addedAt: new Date().toISOString(),
-    });
-    fs.writeFileSync(POSITIONS_FILE, JSON.stringify(positions, null, 2));
-    console.log(`📝 Position recorded: ${vault.name} on chain ${chainId}`);
-  }
-}
+// ─── Balance ──────────────────────────────────────────────────────────────────
 
 async function getUsdcBalance(chainId, wallet) {
   const usdcAddr = getUsdcAddress(chainId);
   if (!usdcAddr) return { chainId, name: getChainName(chainId), usdc: null, amount: 0, raw: 0n, decimals: 6 };
   try {
     const provider = await getProviderWithFallback(chainId);
-    const token = new ethers.Contract(usdcAddr, ERC20_ABI, provider);
+    const token    = new ethers.Contract(usdcAddr, ERC20_ABI, provider);
     const [bal, dec] = await Promise.all([token.balanceOf(wallet), token.decimals()]);
     const amount = parseFloat(ethers.formatUnits(bal, dec));
     return { chainId, name: getChainName(chainId), usdc: usdcAddr, amount, raw: bal, decimals: Number(dec) };
   } catch {
     return { chainId, name: getChainName(chainId), usdc: usdcAddr, amount: 0, raw: 0n, decimals: 6 };
   }
-}
-
-async function ensureAllowance(signer, tokenAddr, spender, amountWei) {
-  const token = new ethers.Contract(tokenAddr, ERC20_ABI, signer);
-  const current = await token.allowance(signer.address, spender);
-  if (current >= BigInt(amountWei)) return;
-  console.log(`  🔓 Approving ${spender.slice(0, 10)}...`);
-  const tx = await token.approve(spender, amountWei);
-  await tx.wait();
-  console.log(`  ✅ Approved`);
-}
-
-async function pollStatus(txHash, fromChainId, toChainId) {
-  for (let i = 0; i < POLL_MAX; i++) {
-    await new Promise(r => setTimeout(r, POLL_MS));
-    try {
-      const res = await axios.get(`${LIFI_API}/status`, {
-        params: { txHash, bridge: 'lifi', fromChain: fromChainId, toChain: toChainId },
-      });
-      const s = res.data.status;
-      process.stdout.write(`\r  ⏳ Status: ${s}${' '.repeat(20)}`);
-      if (s === 'DONE') { console.log(''); return 'DONE'; }
-      if (s === 'FAILED') { console.log(''); return 'FAILED'; }
-    } catch { /* retry */ }
-  }
-  console.log('');
-  return 'TIMEOUT';
 }
 
 async function scanAllBalances(wallet) {
@@ -125,95 +84,217 @@ async function scanAllBalances(wallet) {
   return results.filter(r => r.amount >= MIN_USD).sort((a, b) => b.amount - a.amount);
 }
 
+// ─── Best Vault Suggestion ────────────────────────────────────────────────────
+
 async function suggestTargetChain() {
   try {
     const vaults = await getVaults({ asset: 'USDC', minTvlUsd: 500000 });
     const ranked = rankVaults(vaults);
-    const best = ranked[0];
+    const best   = ranked[0];
     return { chainId: best.vault.chainId, name: getChainName(best.vault.chainId), vault: best };
   } catch {
     return { chainId: 8453, name: 'Base', vault: null };
   }
 }
 
-async function bridgeUsdc({ fromChainId, toChainId, amountWei, wallet }) {
+// ─── Bridge Quote ─────────────────────────────────────────────────────────────
+
+async function getBridgeQuote({ fromChainId, toChainId, amountWei, wallet }) {
   const fromUsdc = getUsdcAddress(fromChainId);
   const toUsdc   = getUsdcAddress(toChainId);
-  console.log(`\n  📡 Getting bridge quote: ${getChainName(fromChainId)} → ${getChainName(toChainId)}`);
-
-  const quote = await axios.get(`${LIFI_API}/quote`, {
+  const res = await axios.get(`${LIFI_API}/quote`, {
     params: {
-      fromChain: fromChainId, toChain: toChainId,
-      fromToken: fromUsdc, toToken: toUsdc,
-      fromAmount: amountWei.toString(),
-      fromAddress: wallet, slippage: '0.005', integrator: 'vaulthoric',
+      fromChain:   fromChainId,
+      toChain:     toChainId,
+      fromToken:   fromUsdc,
+      toToken:     toUsdc,
+      fromAmount:  amountWei.toString(),
+      fromAddress: wallet,
+      slippage:    '0.005',
+      integrator:  'vaulthoric',
     },
   });
+  return res.data;
+}
 
-  const q = quote.data;
-  const estOut  = parseFloat(ethers.formatUnits(q.estimate.toAmount, q.action.toToken.decimals));
-  const gasCost = parseFloat(q.estimate.gasCosts?.[0]?.amountUSD || '0');
-  console.log(`  💱 Est. received: ${estOut.toFixed(4)} USDC | Gas: $${gasCost.toFixed(3)}`);
+// ─── Bridge Execute ───────────────────────────────────────────────────────────
 
-  const signer = getSigner(fromChainId);
-  if (q.estimate.approvalAddress) {
-    await ensureAllowance(signer, fromUsdc, q.estimate.approvalAddress, amountWei.toString());
+async function executeBridge({ fromChainId, toChainId, quote, wallet }) {
+  const fromUsdc = getUsdcAddress(fromChainId);
+  const signer   = getSigner(fromChainId);
+
+  if (quote.estimate.approvalAddress) {
+    await ensureAllowance(signer, fromUsdc, quote.estimate.approvalAddress, quote.action.fromAmount);
   }
 
-  console.log(`  📤 Sending bridge tx...`);
-  const txReq = q.transactionRequest;
+  const txReq = quote.transactionRequest;
   const tx = await signer.sendTransaction({
-    to: txReq.to, data: txReq.data,
-    value: txReq.value ? BigInt(txReq.value) : 0n,
+    to:       txReq.to,
+    data:     txReq.data,
+    value:    txReq.value ? BigInt(txReq.value) : 0n,
     gasLimit: txReq.gasLimit ? BigInt(Math.floor(Number(txReq.gasLimit) * 1.2)) : undefined,
   });
   await tx.wait();
-  console.log(`  🔗 Tx: ${tx.hash}`);
-
-  if (fromChainId !== toChainId) {
-    const status = await pollStatus(tx.hash, fromChainId, toChainId);
-    console.log(`  🏁 Bridge status: ${status}`);
-    return { status, txHash: tx.hash, estOut };
-  }
-  return { status: 'DONE', txHash: tx.hash, estOut };
+  console.log(`  🔗 ${getChainName(fromChainId)} tx: ${tx.hash}`);
+  return {
+    txHash:      tx.hash,
+    fromChainId,
+    estOut:      parseFloat(ethers.formatUnits(quote.estimate.toAmount, quote.action.toToken.decimals)),
+  };
 }
 
-// mode: 'safest' | 'best' | 'highest'
+// Poll a single bridge tx until DONE/FAILED/TIMEOUT.
+async function waitForBridge({ txHash, fromChainId, toChainId, estOut }) {
+  const name = getChainName(fromChainId);
+  for (let i = 0; i < POLL_MAX; i++) {
+    await new Promise(r => setTimeout(r, POLL_MS));
+    try {
+      const res = await axios.get(`${LIFI_API}/status`, {
+        params: { txHash, bridge: 'lifi', fromChain: fromChainId, toChain: toChainId },
+      });
+      const s = res.data.status;
+      if (s === 'DONE')   { console.log(`  ✅ ${name}: complete (+${estOut.toFixed(4)} USDC)`); return { status: 'DONE',    estOut }; }
+      if (s === 'FAILED') { console.log(`  ❌ ${name}: failed`);                                return { status: 'FAILED',  estOut: 0 }; }
+    } catch { /* retry */ }
+  }
+  console.log(`  ⏰ ${name}: timeout`);
+  return { status: 'TIMEOUT', estOut: 0 };
+}
+
+// ─── Parallel Bridge ──────────────────────────────────────────────────────────
+
+async function bridgeAllParallel({ sources, toChainId, wallet }) {
+  // Step 1: Fetch all quotes in parallel
+  console.log('\n📡 Fetching bridge quotes...');
+  const quoted = await Promise.all(
+    sources.map(async (src) => {
+      try {
+        const q        = await getBridgeQuote({ fromChainId: src.chainId, toChainId, amountWei: src.raw, wallet });
+        const estOut   = parseFloat(ethers.formatUnits(q.estimate.toAmount, q.action.toToken.decimals));
+        const gasCost  = parseFloat(q.estimate.gasCosts?.[0]?.amountUSD || '0');
+        const duration = q.estimate.executionDuration || null;
+        return { src, quote: q, estOut, gasCost, duration, error: null };
+      } catch (e) {
+        return { src, quote: null, estOut: 0, gasCost: 0, duration: null, error: e.message };
+      }
+    })
+  );
+
+  // Display plan with per-bridge duration estimates
+  const durations   = quoted.filter(q => q.duration).map(q => q.duration);
+  const maxDuration = durations.length ? Math.max(...durations) : null;
+  console.log('\n📦 Bridge plan:');
+  quoted.forEach(({ src, estOut, gasCost, duration, error }) => {
+    if (error) {
+      console.log(`  • ${src.name.padEnd(12)} → ${getChainName(toChainId)}: ❌ quote failed`);
+    } else {
+      console.log(
+        `  • ${src.name.padEnd(12)} → ${getChainName(toChainId)}: ` +
+        `${src.amount.toFixed(4)} USDC  ` +
+        `(est. out: ${estOut.toFixed(4)}, gas: ${fmtGas(gasCost)}, ⏱️  ${fmtDuration(duration)})`
+      );
+    }
+  });
+  if (maxDuration) {
+    console.log(`\n  ⏱️  Est. total wait (parallel): ${fmtDuration(maxDuration)}`);
+  }
+
+  const valid = quoted.filter(q => q.quote !== null);
+  if (valid.length === 0) { console.log('❌ No valid bridge quotes.'); return 0; }
+
+  // Step 2: Submit all txs in parallel
+  console.log('\n🚀 Submitting bridge transactions in parallel...');
+  const submitted = await Promise.all(
+    valid.map(async ({ src, quote }) => {
+      try {
+        return await executeBridge({ fromChainId: src.chainId, toChainId, quote, wallet });
+      } catch (e) {
+        console.log(`  ❌ ${getChainName(src.chainId)}: tx failed — ${e.message?.slice(0, 60)}`);
+        return null;
+      }
+    })
+  );
+
+  // Step 3: Poll all in parallel
+  const pending = submitted.filter(Boolean);
+  if (pending.length === 0) { console.log('❌ No transactions submitted.'); return 0; }
+
+  console.log(`\n⏳ Waiting for ${pending.length} bridge(s) to complete...`);
+  const results = await Promise.all(
+    pending.map(({ txHash, fromChainId, estOut }) =>
+      waitForBridge({ txHash, fromChainId, toChainId, estOut })
+    )
+  );
+
+  return results.reduce((s, r) => s + (r.status === 'DONE' ? r.estOut : 0), 0);
+}
+
+// ─── Dry Run Quote Display ────────────────────────────────────────────────────
+
+async function showDryRunPlan({ toBridge, toChainId, alreadyThere, wallet }) {
+  console.log('\n🧪 DRY RUN — fetching quotes for estimate only...');
+  const quoted = await Promise.all(
+    toBridge.map(async (src) => {
+      try {
+        const q        = await getBridgeQuote({ fromChainId: src.chainId, toChainId, amountWei: src.raw, wallet });
+        const estOut   = parseFloat(ethers.formatUnits(q.estimate.toAmount, q.action.toToken.decimals));
+        const gasCost  = parseFloat(q.estimate.gasCosts?.[0]?.amountUSD || '0');
+        const duration = q.estimate.executionDuration || null;
+        return { src, estOut, gasCost, duration, error: null };
+      } catch (e) {
+        return { src, estOut: 0, gasCost: 0, duration: null, error: e.message };
+      }
+    })
+  );
+
+  const durations   = quoted.filter(q => q.duration).map(q => q.duration);
+  const maxDuration = durations.length ? Math.max(...durations) : null;
+  const targetName  = getChainName(toChainId);
+
+  console.log('\n📦 Bridge plan (dry run):');
+  quoted.forEach(({ src, estOut, gasCost, duration, error }) => {
+    if (error) {
+      console.log(`  • ${src.name.padEnd(12)} → ${targetName}: ❌ quote failed`);
+    } else {
+      console.log(
+        `  • ${src.name.padEnd(12)} → ${targetName}: ` +
+        `${src.amount.toFixed(4)} USDC  ` +
+        `(est. out: ${estOut.toFixed(4)}, gas: ${fmtGas(gasCost)}, ⏱️  ${fmtDuration(duration)})`
+      );
+    }
+  });
+  if (alreadyThere) console.log(`  • ${targetName.padEnd(12)}: ${alreadyThere.amount.toFixed(4)} USDC (already there)`);
+  if (maxDuration)  console.log(`\n  ⏱️  Est. total wait (parallel): ${fmtDuration(maxDuration)}`);
+  console.log('\n  Remove --dry-run to execute.');
+}
+
+// ─── Vault Deposit ────────────────────────────────────────────────────────────
 
 async function promptVaultMode(rl, chainName) {
   console.log(`\n🏦 Deposit consolidated USDC into vault on ${chainName}?`);
-  console.log('  1. 🛡️  Safest   (stability & trust重視)');
+  console.log('  1. 🛡️  Safest   (stability & trust first)');
   console.log('  2. ⚖️  Best     (risk-adjusted score)');
-  console.log('  3. 🚀 Highest  (APY最大)');
+  console.log('  3. 🚀 Highest  (max APY)');
   console.log('  n. Skip');
-  const choice = await prompt(rl, '\nSelect (1/2/3/n): ');
+  const choice  = await prompt(rl, '\nSelect (1/2/3/n): ');
   const modeMap = { '1': 'safest', '2': 'best', '3': 'highest' };
   return modeMap[choice] || null;
 }
-function selectByMode(ranked, mode) {
-  if (mode === 'safest') {
-    return [...ranked].sort((a, b) => (b.stability * b.trust) - (a.stability * a.trust))[0];
-  } else if (mode === 'highest') {
-    return [...ranked].sort((a, b) => b.apy - a.apy)[0];
-  }
-  return ranked[0]; // best = score順
-}
 
 async function depositBestVault({ chainId, amountWei, wallet, mode = 'best' }) {
-  const { depositToVault } = require('./composer');
-  const vaults = await getVaults({ asset: 'USDC', minTvlUsd: 500000 });
+  const vaults  = await getVaults({ asset: 'USDC', minTvlUsd: 500000 });
   const onChain = vaults.filter(v => v.chainId === chainId);
   if (onChain.length === 0) { console.log(`  ⚠️  No vaults on chain ${chainId}`); return null; }
 
   const ranked = rankVaults(onChain).filter(v => v.vault.depositPacks?.length > 0);
   const candidates = mode === 'safest'
-    ? [...ranked].sort((a,b) => (b.stability*b.trust)-(a.stability*a.trust))
+    ? [...ranked].sort((a, b) => (b.stability * b.trust) - (a.stability * a.trust))
     : mode === 'highest'
-    ? [...ranked].sort((a,b) => b.apy-a.apy)
+    ? [...ranked].sort((a, b) => b.apy - a.apy)
     : ranked;
 
   const modeLabel = { safest: '🛡️  Safest', best: '⚖️  Best', highest: '🚀 Highest yield' }[mode] || mode;
-  const signer = getSigner(chainId);
+  const signer    = getSigner(chainId);
 
   for (const candidate of candidates.slice(0, 5)) {
     console.log(`\n  ${modeLabel} vault: ${candidate.vault.name} (${candidate.vault.protocol})`);
@@ -221,25 +302,28 @@ async function depositBestVault({ chainId, amountWei, wallet, mode = 'best' }) {
     try {
       const result = await depositToVault({
         signer,
-        fromChainId: chainId, toChainId: chainId,
-        fromTokenAddress: getUsdcAddress(chainId),
+        fromChainId:       chainId,
+        toChainId:         chainId,
+        fromTokenAddress:  getUsdcAddress(chainId),
         vaultTokenAddress: candidate.vault.address,
-        amountWei: amountWei.toString(),
-        depositPack: candidate.vault.depositPacks?.[0]?.name || '',
+        amountWei:         amountWei.toString(),
+        depositPack:       candidate.vault.depositPacks?.[0]?.name || '',
       });
       recordPosition(candidate.vault, chainId);
       return result;
     } catch (e) {
-      console.log(`  ⚠️  Failed: ${e.message?.slice(0,60)} — trying next vault...`);
+      console.log(`  ⚠️  Failed: ${e.message?.slice(0, 60)} — trying next vault...`);
     }
   }
   console.log('❌ All vault candidates failed.');
   return null;
 }
 
+// ─── CLI ──────────────────────────────────────────────────────────────────────
+
 async function main() {
   const wallet = new ethers.Wallet(process.env.PRIVATE_KEY).address;
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl     = readline.createInterface({ input: process.stdin, output: process.stdout });
 
   console.log(`\n🏦 Vaulthoric — Consolidate`);
   console.log(`👛 Wallet: ${wallet}`);
@@ -260,6 +344,7 @@ async function main() {
   console.log(`${'─'.repeat(50)}`);
   console.log(`  Total: ${totalUsd.toFixed(4)} USDC\n`);
 
+  // Single chain — nothing to bridge
   if (balances.length === 1) {
     console.log(`ℹ️  Only 1 chain has balance. Nothing to consolidate.`);
     if (process.argv.includes('--dry-run')) {
@@ -274,6 +359,7 @@ async function main() {
     rl.close(); return;
   }
 
+  // Suggest best target chain
   console.log('🤖 Finding best vault across all chains...');
   const suggested = await suggestTargetChain();
   console.log(`\n💡 Suggested target: ${suggested.name}`);
@@ -281,7 +367,8 @@ async function main() {
     console.log(`   Best vault: ${suggested.vault.vault.name} | APY ${suggested.vault.apy.toFixed(2)}% | score=${suggested.vault.score.toFixed(2)}`);
   }
 
-  const scanIds = getScanChainIds();
+  // Build chain selection list
+  const scanIds       = getScanChainIds();
   const targetOptions = Object.entries(CHAINS).filter(([cid]) => {
     const id = parseInt(cid);
     return scanIds.includes(id) || balances.some(b => b.chainId === id);
@@ -310,42 +397,26 @@ async function main() {
   const targetName = getChainName(targetChainId);
   console.log(`\n✅ Target: ${targetName} (chain=${targetChainId})`);
 
-  const toBridge = balances.filter(b => b.chainId !== targetChainId);
+  const toBridge     = balances.filter(b => b.chainId !== targetChainId);
   const alreadyThere = balances.find(b => b.chainId === targetChainId);
 
   if (toBridge.length === 0) {
     console.log(`\nℹ️  All USDC is already on ${targetName}.`);
   } else {
-    console.log(`\n📦 Bridge plan:`);
-    toBridge.forEach(b => console.log(`  • ${b.name.padEnd(12)} → ${targetName}: ${b.amount.toFixed(4)} USDC`));
-    if (alreadyThere) console.log(`  • ${targetName.padEnd(12)}: ${alreadyThere.amount.toFixed(4)} USDC (already there)`);
-
     if (process.argv.includes('--dry-run')) {
-      console.log('\n🧪 DRY RUN — no transactions sent. Remove --dry-run to execute.');
+      await showDryRunPlan({ toBridge, toChainId: targetChainId, alreadyThere, wallet });
       rl.close(); return;
     }
 
     const go = await prompt(rl, '\n🚀 Execute bridge? (y/n): ');
     if (go.toLowerCase() !== 'y') { console.log('❌ Cancelled.'); rl.close(); return; }
 
-    let totalBridged = 0;
-    for (const src of toBridge) {
-      console.log(`\n🌉 Bridging from ${src.name}...`);
-      try {
-        const result = await bridgeUsdc({ fromChainId: src.chainId, toChainId: targetChainId, amountWei: src.raw, wallet });
-        if (result.status === 'DONE') {
-          totalBridged += result.estOut;
-          console.log(`  ✅ Done: +${result.estOut.toFixed(4)} USDC on ${targetName}`);
-        } else {
-          console.log(`  ⚠️  Status: ${result.status}`);
-        }
-      } catch (e) {
-        console.error(`  ❌ Bridge failed: ${e.response?.data?.message || e.message}`);
-      }
-    }
-    console.log(`\n💰 Estimated total on ${targetName}: ${(totalBridged + (alreadyThere?.amount || 0)).toFixed(4)} USDC`);
+    const totalBridged = await bridgeAllParallel({ sources: toBridge, toChainId: targetChainId, wallet });
+    const grandTotal   = totalBridged + (alreadyThere?.amount || 0);
+    console.log(`\n💰 Estimated total on ${targetName}: ${grandTotal.toFixed(4)} USDC`);
   }
 
+  // Optionally deposit into best vault
   const mode = await promptVaultMode(rl, targetName);
   if (mode) {
     console.log(`\n🔄 Checking final balance on ${targetName}...`);

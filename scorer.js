@@ -1,13 +1,15 @@
-// リスク調整済みvaultスコアリング
-// APYはAPIから%単位で返ってくる（例: 5.34 = 5.34%）
-// net_apy = (gross_yield - gas_cost) / amount * 100
-// score = net_apy * stability * (1 + tvl_bonus) * trust * penalty
+// Vaulthoric — Vault Scoring Engine
+// Risk-adjusted scoring formula:
+//   score = net_apy * stability * (1 + tvl_bonus) * trust * penalty
+//
+// APY values from the LI.FI API are already in percent (e.g. 5.34 = 5.34%).
+// net_apy = (gross_yield - gas_cost) / deposit_amount * 100
 
 const MIN_TVL_USD = 1_000_000;
-const MIN_APY = 0.1;
-const MAX_APY = 100; // 100%超えは異常値として除外
+const MIN_APY     = 0.1;
+const MAX_APY     = 100; // Filter out abnormal outliers above 100%
 
-// プロトコル信頼スコア（LI.FI Earn対応プロトコル全11種）
+// Protocol trust multipliers (covers all 11 LI.FI Earn protocols)
 const PROTOCOL_TRUST = {
   'aave-v3':         1.3,
   'morpho-v1':       1.25,
@@ -22,7 +24,7 @@ const PROTOCOL_TRUST = {
   'neverland':       0.9,
 };
 
-// チェーンごとのvault deposit推定ガスコスト（USD）
+// Estimated vault deposit gas cost per chain (USD)
 const GAS_COST_USD = {
   1:      0.5,   // Ethereum
   10:     0.01,  // Optimism
@@ -43,93 +45,91 @@ const GAS_COST_USD = {
   747474: 0.01,  // Katana
 };
 
-// ブリッジコスト推定（USD）
+// Estimated bridge cost (USD), added when source and destination chains differ
 const BRIDGE_COST_USD = 0.01;
 
-// APY安定性スコア（変動係数ベース、0〜1）
+// ─── Scoring Components ───────────────────────────────────────────────────────
+
+// APY stability score based on coefficient of variation across time windows (0–1).
 function apyStability(vault) {
   const { apy, apy1d, apy7d, apy30d } = vault.analytics;
   const current = apy.total;
-  const values = [current, apy1d, apy7d, apy30d].filter(v => v != null && v > 0);
+  const values  = [current, apy1d, apy7d, apy30d].filter(v => v != null && v > 0);
   if (values.length < 2) return 0.5;
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const mean     = values.reduce((a, b) => a + b, 0) / values.length;
   const variance = values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / values.length;
-  const cv = mean > 0 ? Math.sqrt(variance) / mean : 1;
+  const cv       = mean > 0 ? Math.sqrt(variance) / mean : 1;
   return Math.max(0, 1 - cv);
 }
 
-// TVLボーナス（log10スケール）
+// TVL bonus on a log10 scale (0 at MIN_TVL_USD, grows slowly above it).
 function tvlBonus(vault) {
   const tvlUsd = parseFloat(vault.analytics.tvl.usd);
   if (tvlUsd < MIN_TVL_USD) return 0;
   return Math.log10(tvlUsd / MIN_TVL_USD + 1);
 }
 
-// ペナルティ係数
+// Penalty multiplier for KYC requirements or long time-locks.
 function penalties(vault) {
   let penalty = 1.0;
-  if (vault.kyc) penalty *= 0.5;
+  if (vault.kyc)             penalty *= 0.5;
   if (vault.timeLock > 86400) penalty *= 0.8;
   return penalty;
 }
 
-// メインスコアリング
+// ─── Main Scorer ──────────────────────────────────────────────────────────────
+
 function scoreVault(vault, amountUsd = 1000, fromChainId = null) {
   const apy = vault.analytics.apy.total;
   if (!apy || apy < MIN_APY || apy > MAX_APY) return null;
 
-  // LI.FI APIでdeposit/redeemが両方対応してるvaultのみ対象
-  if (!vault.isTransactional) return null;
-  if (!vault.isRedeemable) return null;
-  if (!vault.redeemPacks || vault.redeemPacks.length === 0) return null;
+  // Only include vaults that support both deposit and redeem via LI.FI.
+  if (!vault.isTransactional)                      return null;
+  if (!vault.isRedeemable)                         return null;
+  if (!vault.redeemPacks  || vault.redeemPacks.length  === 0) return null;
   if (!vault.depositPacks || vault.depositPacks.length === 0) return null;
 
   const stability = apyStability(vault);
-  const tvl = tvlBonus(vault);
-  const penalty = penalties(vault);
-  const trust = PROTOCOL_TRUST[vault.protocol.name] || 1.0;
+  const tvl       = tvlBonus(vault);
+  const penalty   = penalties(vault);
+  const trust     = PROTOCOL_TRUST[vault.protocol.name] || 1.0;
 
-  // ガスコスト計算
-  const chainGas = GAS_COST_USD[vault.chainId] || 0.5;
-  const needsBridge = fromChainId && fromChainId !== vault.chainId;
+  const chainGas     = GAS_COST_USD[vault.chainId] || 0.5;
+  const needsBridge  = fromChainId && fromChainId !== vault.chainId;
   const totalGasCost = chainGas + (needsBridge ? BRIDGE_COST_USD : 0);
 
-  // 年間収益（gross）
   const grossYield = amountUsd * (apy / 100);
+  const netYield   = grossYield - totalGasCost;
+  const netApy     = (netYield / amountUsd) * 100;
 
-  // net APY（ガスコスト差し引き後）
-  const netYield = grossYield - totalGasCost;
-  const netApy = (netYield / amountUsd) * 100;
-
-  // 総合スコア
   const score = netApy * stability * (1 + tvl * 0.2) * trust * penalty;
 
   return {
-    score: parseFloat(score.toFixed(4)),
-    apy: parseFloat(apy.toFixed(2)),
-    netApy: parseFloat(netApy.toFixed(2)),
-    stability: parseFloat(stability.toFixed(3)),
-    tvlUsd: parseFloat(vault.analytics.tvl.usd),
-    penalty: parseFloat(penalty.toFixed(2)),
+    score:         parseFloat(score.toFixed(4)),
+    apy:           parseFloat(apy.toFixed(2)),
+    netApy:        parseFloat(netApy.toFixed(2)),
+    stability:     parseFloat(stability.toFixed(3)),
+    tvlUsd:        parseFloat(vault.analytics.tvl.usd),
+    penalty:       parseFloat(penalty.toFixed(2)),
     trust,
-    totalGasCost: parseFloat(totalGasCost.toFixed(3)),
-    grossYield: parseFloat(grossYield.toFixed(2)),
-    netYield: parseFloat(netYield.toFixed(2)),
+    totalGasCost:  parseFloat(totalGasCost.toFixed(3)),
+    grossYield:    parseFloat(grossYield.toFixed(2)),
+    netYield:      parseFloat(netYield.toFixed(2)),
     vault: {
-      address: vault.address,
-      chainId: vault.chainId,
-      name: vault.name,
-      protocol: vault.protocol.name,
-      network: vault.network,
-      slug: vault.slug,
+      address:          vault.address,
+      chainId:          vault.chainId,
+      name:             vault.name,
+      protocol:         vault.protocol.name,
+      network:          vault.network,
+      slug:             vault.slug,
       underlyingTokens: vault.underlyingTokens,
-      depositPacks: vault.depositPacks,
-      redeemPacks: vault.redeemPacks,
-    }
+      depositPacks:     vault.depositPacks,
+      redeemPacks:      vault.redeemPacks,
+    },
   };
 }
 
-// vault配列をスコアリングしてソート
+// Score and sort an array of vaults, discarding null scores and negative net APY.
 function rankVaults(vaults, amountUsd = 1000, fromChainId = null) {
   return vaults
     .map(v => scoreVault(v, amountUsd, fromChainId))
@@ -137,9 +137,9 @@ function rankVaults(vaults, amountUsd = 1000, fromChainId = null) {
     .sort((a, b) => b.score - a.score);
 }
 
-// asset別トップvault
+// Return top-N vaults grouped by underlying asset symbol.
 function topVaultsByAsset(vaults, topN = 3, amountUsd = 1000, fromChainId = null) {
-  const ranked = rankVaults(vaults, amountUsd, fromChainId);
+  const ranked  = rankVaults(vaults, amountUsd, fromChainId);
   const byAsset = {};
   for (const result of ranked) {
     const symbols = result.vault.underlyingTokens.map(t => t.symbol).join('+');

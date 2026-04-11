@@ -1,9 +1,22 @@
+// Vaulthoric — Core Agent
+// Vault scanning, portfolio display, balance checks, and auto-allocation.
+// Also exports shared UI helpers (printVaultTable) used by ask.js.
+
 require('dotenv').config();
+
 const { ethers } = require('ethers');
 const { getVaults, getPortfolio } = require('./earn');
 const { rankVaults } = require('./scorer');
 const { depositToVault, getTokenBalance } = require('./composer');
-const { getChainName, getChainRpc, getUsdcAddress, getSupportedChainIds } = require('./tools');
+const {
+  getChainName,
+  getChainRpc,
+  getUsdcAddress,
+  getSupportedChainIds,
+  getProviderWithFallback,
+} = require('./tools');
+
+// ─── Provider / Signer ────────────────────────────────────────────────────────
 
 function getProvider(chainId) {
   const rpc = getChainRpc(chainId);
@@ -18,13 +31,12 @@ function getSigner(chainId) {
   return new ethers.Wallet(pk, provider);
 }
 
-// テーブル表示（注釈付き）
+// ─── Vault Table ──────────────────────────────────────────────────────────────
+
 function printVaultTable(ranked, topN = 10, amountUsd = 1000) {
-  const rows = ranked.slice(0, topN);
-
+  const rows   = ranked.slice(0, topN);
   const header = ['Rank', 'Score※1', 'APY%', 'Net APY%※2', 'Stability※3', 'TVL', 'Trust※4', 'Gas+Bridge', 'Net Yield/yr', 'Protocol', 'Network'];
-
-  const data = rows.map((v, i) => [
+  const data   = rows.map((v, i) => [
     `#${i + 1}`,
     v.score.toFixed(2),
     v.apy.toFixed(2) + '%',
@@ -39,8 +51,8 @@ function printVaultTable(ranked, topN = 10, amountUsd = 1000) {
   ]);
 
   const cols = header.map((h, i) => Math.max(h.length, ...data.map(r => r[i].length)));
-  const sep = '+-' + cols.map(w => '-'.repeat(w)).join('-+-') + '-+';
-  const fmt = (row) => '| ' + row.map((cell, i) => cell.padEnd(cols[i])).join(' | ') + ' |';
+  const sep  = '+-' + cols.map(w => '-'.repeat(w)).join('-+-') + '-+';
+  const fmt  = (row) => '| ' + row.map((cell, i) => cell.padEnd(cols[i])).join(' | ') + ' |';
 
   console.log('\n' + sep);
   console.log(fmt(header));
@@ -56,7 +68,8 @@ function printVaultTable(ranked, topN = 10, amountUsd = 1000) {
                  ethena:1.10 maple:1.05 upshift:1.00 yo/neverland:0.90`);
 }
 
-// vault スキャン
+// ─── Vault Scanner ────────────────────────────────────────────────────────────
+
 async function findBestVault({ asset = 'USDC', minTvlUsd = 1000000, topN = 10, amountUsd = 1000, fromChainId = null } = {}) {
   console.log(`\n🔍 Scanning vaults for ${asset} (deposit: $${amountUsd})...`);
   const vaults = await getVaults({ asset, minTvlUsd });
@@ -69,17 +82,19 @@ async function findBestVault({ asset = 'USDC', minTvlUsd = 1000000, topN = 10, a
   return ranked[0];
 }
 
-// 残高確認
+// ─── Balance Check ────────────────────────────────────────────────────────────
+
 async function checkBalance(chainId, tokenAddress) {
   const provider = getProvider(chainId);
-  const wallet = new ethers.Wallet(process.env.PRIVATE_KEY);
+  const wallet   = new ethers.Wallet(process.env.PRIVATE_KEY);
   const { balance, symbol, decimals } = await getTokenBalance(provider, tokenAddress, wallet.address);
   const formatted = ethers.formatUnits(balance, decimals);
   console.log(`\n💰 Balance on ${getChainName(chainId)}: ${formatted} ${symbol}`);
   return { balance, symbol, decimals, formatted };
 }
 
-// 提案モード
+// ─── Suggest Mode ─────────────────────────────────────────────────────────────
+
 async function suggest({ walletAddress, asset = 'USDC', minTvlUsd = 1000000 } = {}) {
   console.log('\n🤖 Vaulthoric — Yield Suggestion');
   console.log('=================================');
@@ -98,7 +113,7 @@ async function suggest({ walletAddress, asset = 'USDC', minTvlUsd = 1000000 } = 
         balances.push({ chainId, tokenAddress, symbol, usd, balance, decimals });
         console.log(`  ${getChainName(chainId).padEnd(12)} | ${usd.toFixed(4)} ${symbol}`);
       }
-    } catch (e) { /* skip */ }
+    } catch { /* skip */ }
   }
 
   if (balances.length === 0) {
@@ -106,7 +121,7 @@ async function suggest({ walletAddress, asset = 'USDC', minTvlUsd = 1000000 } = 
     return;
   }
 
-  const totalUsd = balances.reduce((a, b) => a + b.usd, 0);
+  const totalUsd      = balances.reduce((a, b) => a + b.usd, 0);
   const primaryChainId = balances.sort((a, b) => b.usd - a.usd)[0].chainId;
   console.log(`\n  Total idle ${asset}: $${totalUsd.toFixed(2)} (largest on ${getChainName(primaryChainId)})`);
 
@@ -130,7 +145,8 @@ async function suggest({ walletAddress, asset = 'USDC', minTvlUsd = 1000000 } = 
   return { balances, best, totalUsd };
 }
 
-// 自動アロケーション
+// ─── Auto-Allocate ────────────────────────────────────────────────────────────
+
 async function autoAllocate({ fromChainId, asset = 'USDC', amountUsd, minTvlUsd = 1000000, dryRun = true } = {}) {
   console.log('\n🤖 Vaulthoric Auto-Allocate');
   console.log('============================');
@@ -140,7 +156,7 @@ async function autoAllocate({ fromChainId, asset = 'USDC', amountUsd, minTvlUsd 
   if (!best) { console.log('❌ No suitable vault found'); return; }
 
   const targetVault = best.vault;
-  const fromToken = getUsdcAddress(fromChainId);
+  const fromToken   = getUsdcAddress(fromChainId);
   if (!fromToken) { console.log(`❌ No USDC address for chainId ${fromChainId}`); return; }
 
   const { balance, decimals, formatted } = await checkBalance(fromChainId, fromToken);
@@ -169,14 +185,15 @@ async function autoAllocate({ fromChainId, asset = 'USDC', amountUsd, minTvlUsd 
   return await depositToVault({
     signer,
     fromChainId,
-    toChainId: targetVault.chainId,
-    fromTokenAddress: fromToken,
+    toChainId:         targetVault.chainId,
+    fromTokenAddress:  fromToken,
     vaultTokenAddress: targetVault.address,
-    amountWei: amountWei.toString(),
+    amountWei:         amountWei.toString(),
   });
 }
 
-// ポートフォリオ表示
+// ─── Portfolio ────────────────────────────────────────────────────────────────
+
 async function showPortfolio(walletAddress) {
   console.log(`\n📊 Portfolio for ${walletAddress}`);
   const positions = await getPortfolio(walletAddress);
@@ -187,14 +204,15 @@ async function showPortfolio(walletAddress) {
   return positions;
 }
 
-// CLI
+// ─── CLI ──────────────────────────────────────────────────────────────────────
+
 async function main() {
   const cmd = process.argv[2];
 
   if (cmd === 'scan') {
-    const asset = process.argv[3] || 'USDC';
-    const amount = parseFloat(process.argv[4] || '1000');
-    const fromChain = process.argv[5] ? parseInt(process.argv[5]) : null;
+    const asset      = process.argv[3] || 'USDC';
+    const amount     = parseFloat(process.argv[4] || '1000');
+    const fromChain  = process.argv[5] ? parseInt(process.argv[5]) : null;
     await findBestVault({ asset, amountUsd: amount, fromChainId: fromChain });
 
   } else if (cmd === 'balance') {
@@ -211,8 +229,8 @@ async function main() {
 
   } else if (cmd === 'allocate') {
     const fromChainId = parseInt(process.argv[3] || '8453');
-    const amountUsd = process.argv[4] ? parseFloat(process.argv[4]) : null;
-    const dryRun = process.argv[5] !== '--execute';
+    const amountUsd   = process.argv[4] ? parseFloat(process.argv[4]) : null;
+    const dryRun      = process.argv[5] !== '--execute';
     await autoAllocate({ fromChainId, asset: 'USDC', amountUsd, dryRun });
 
   } else {
@@ -236,7 +254,6 @@ Examples:
   }
 }
 
-// require()で読み込まれた時はmain()を実行しない
 if (require.main === module) {
   main().catch(console.error);
 }

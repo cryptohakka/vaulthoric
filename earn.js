@@ -1,23 +1,25 @@
+// Vaulthoric — LI.FI Earn API Client
+// Thin wrapper around the LI.FI Earn REST API for vault and portfolio data.
+
 const axios = require('axios');
 
 const EARN_BASE = 'https://earn.li.fi';
-const API_KEY = process.env.LIFI_API_KEY || '';
+const API_KEY   = process.env.LIFI_API_KEY || '';
+const HEADERS   = API_KEY ? { 'x-lifi-api-key': API_KEY } : {};
 
-const headers = API_KEY ? { 'x-lifi-api-key': API_KEY } : {};
-
-// vault一覧取得（全ページ）
+// Fetch all vaults matching the given filters (auto-paginates via cursor).
 async function getVaults({ chainId, asset, minTvlUsd = 1000000 } = {}) {
   const allVaults = [];
   let cursor;
 
   do {
     const params = new URLSearchParams({ limit: '100', sortBy: 'apy' });
-    if (chainId) params.set('chainId', chainId);
-    if (asset) params.set('asset', asset);
+    if (chainId)   params.set('chainId',   chainId);
+    if (asset)     params.set('asset',     asset);
     if (minTvlUsd) params.set('minTvlUsd', minTvlUsd);
-    if (cursor) params.set('cursor', cursor);
+    if (cursor)    params.set('cursor',    cursor);
 
-    const res = await axios.get(`${EARN_BASE}/v1/earn/vaults?${params}`, { headers });
+    const res = await axios.get(`${EARN_BASE}/v1/earn/vaults?${params}`, { headers: HEADERS });
     allVaults.push(...res.data.data);
     cursor = res.data.nextCursor;
   } while (cursor);
@@ -25,21 +27,21 @@ async function getVaults({ chainId, asset, minTvlUsd = 1000000 } = {}) {
   return allVaults;
 }
 
-// 単一vault取得
+// Fetch a single vault by chain and contract address.
 async function getVault(chainId, address) {
-  const res = await axios.get(`${EARN_BASE}/v1/earn/vaults/${chainId}/${address}`, { headers });
+  const res = await axios.get(`${EARN_BASE}/v1/earn/vaults/${chainId}/${address}`, { headers: HEADERS });
   return res.data;
 }
 
-// 対応チェーン一覧
+// Fetch the list of chains supported by LI.FI Earn.
 async function getChains() {
-  const res = await axios.get(`${EARN_BASE}/v1/earn/chains`, { headers });
+  const res = await axios.get(`${EARN_BASE}/v1/earn/chains`, { headers: HEADERS });
   return res.data;
 }
 
-// ユーザーポジション取得
+// Fetch active vault positions for a given wallet address.
 async function getPortfolio(userAddress) {
-  const res = await axios.get(`${EARN_BASE}/v1/earn/portfolio/${userAddress}/positions`, { headers });
+  const res = await axios.get(`${EARN_BASE}/v1/earn/portfolio/${userAddress}/positions`, { headers: HEADERS });
   return res.data.positions;
 }
 

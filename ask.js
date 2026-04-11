@@ -1,76 +1,36 @@
+// Vaulthoric — Natural Language Yield Agent
+// Parses a plain-English instruction, finds the best vault, and executes deposit.
+
 require('dotenv').config();
 
-// ethers.jsの内部RPCエラーログを抑制
-const { Writable } = require('stream');
-const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-process.stdout.write = (chunk, ...args) => {
-  const msg = chunk.toString();
-  if (msg.includes('JsonRpcProvider failed') || msg.includes('retry in 1s')) return true;
-  return originalStdoutWrite(chunk, ...args);
-};
-const originalStderrWrite = process.stderr.write.bind(process.stderr);
-process.stderr.write = (chunk, ...args) => {
-  const msg = chunk.toString();
-  if (msg.includes('JsonRpcProvider failed') || msg.includes('retry in 1s')) return true;
-  return originalStderrWrite(chunk, ...args);
-};
-
-const axios = require('axios');
+const axios    = require('axios');
 const readline = require('readline');
-const fs = require('fs');
-const path = require('path');
 const { ethers } = require('ethers');
-const { getVaults } = require('./earn');
-const { rankVaults } = require('./scorer');
+const { getVaults }    = require('./earn');
+const { rankVaults }   = require('./scorer');
 const { depositToVault, getTokenBalance } = require('./composer');
-const { getChainName, getChainRpc, getUsdcAddress, getScanChainIds, CHAIN_NAME_TO_ID, getProviderWithFallback } = require('./tools');
 const { printVaultTable } = require('./agent');
+const {
+  getChainName,
+  getUsdcAddress,
+  getScanChainIds,
+  getProviderWithFallback,
+  CHAIN_NAME_TO_ID,
+  recordPosition,
+  suppressRpcNoise,
+} = require('./tools');
+
+suppressRpcNoise();
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-flash-1.5';
-const POSITIONS_FILE = path.join(__dirname, 'positions.json');
+const OPENROUTER_MODEL   = process.env.OPENROUTER_MODEL || 'google/gemini-flash-1.5';
 
 function prompt(rl, question) {
   return new Promise(resolve => rl.question(question, resolve));
 }
 
-// positions.json読み込み
-function loadPositions() {
-  try {
-    if (fs.existsSync(POSITIONS_FILE)) {
-      return JSON.parse(fs.readFileSync(POSITIONS_FILE, 'utf8'));
-    }
-  } catch (e) {}
-  return [];
-}
+// ─── LLM Instruction Parser ───────────────────────────────────────────────────
 
-// positions.json保存
-function savePositions(positions) {
-  fs.writeFileSync(POSITIONS_FILE, JSON.stringify(positions, null, 2));
-}
-
-// deposit成功後にpositions.jsonに記録
-function recordPosition(vault, chainId) {
-  const positions = loadPositions();
-  const key = `${chainId}-${vault.address.toLowerCase()}`;
-  const exists = positions.find(p => `${p.chainId}-${p.address.toLowerCase()}` === key);
-  if (!exists) {
-    positions.push({
-      address: vault.address,
-      chainId,
-      protocol: vault.protocol,
-      name: vault.name,
-      symbol: vault.underlyingTokens?.[0]?.symbol || 'USDC',
-      decimals: 18,
-      depositPack: vault.depositPacks?.[0]?.name || '',
-      addedAt: new Date().toISOString(),
-    });
-    savePositions(positions);
-    console.log(`📝 Position recorded to positions.json`);
-  }
-}
-
-// LLMでユーザー指示を解析
 async function parseInstruction(instruction) {
   const chainList = Object.entries(CHAIN_NAME_TO_ID)
     .map(([name, id]) => `${name}(${id})`).join(', ');
@@ -78,7 +38,7 @@ async function parseInstruction(instruction) {
   const res = await axios.post(
     'https://openrouter.ai/api/v1/chat/completions',
     {
-      model: OPENROUTER_MODEL,
+      model:      OPENROUTER_MODEL,
       max_tokens: 300,
       messages: [
         {
@@ -105,31 +65,32 @@ chainId rules:
 
 Mode selection rules (choose exactly one):
 - "safe", "safest", "secure", "low risk", "conservative" → mode: "safest"
-- "best", "optimal", "recommended", "good", "balanced" → mode: "balanced"
-- "highest", "maximum", "max yield", "most yield", "highest APY", "best yield" → mode: "highest"
+- "best", "optimal", "recommended", "good", "balanced"  → mode: "balanced"
+- "highest", "maximum", "max yield", "most yield", "highest APY" → mode: "highest"
 - default when unclear → mode: "balanced"
 
 minApy rules:
 - Extract explicit APY thresholds ("above 5%", "at least 3%", "minimum 7%") → minApy: number
-- If no APY threshold mentioned → minApy: null`
+- If no APY threshold mentioned → minApy: null`,
         },
-        { role: 'user', content: instruction }
-      ]
+        { role: 'user', content: instruction },
+      ],
     },
     {
       headers: {
         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://vaulthoric.xyz',
-        'X-Title': 'Vaulthoric Agent',
-      }
+        'Content-Type':  'application/json',
+        'HTTP-Referer':  'https://vaulthoric.xyz',
+        'X-Title':       'Vaulthoric Agent',
+      },
     }
   );
   const raw = res.data.choices[0].message.content.replace(/```json|```/g, '').trim();
   return JSON.parse(raw);
 }
 
-// 残高確認（フォールバックRPC対応）
+// ─── Balance Check ────────────────────────────────────────────────────────────
+
 async function checkBalance(chainId, walletAddress) {
   const tokenAddress = getUsdcAddress(chainId);
   if (!tokenAddress) return null;
@@ -138,12 +99,13 @@ async function checkBalance(chainId, walletAddress) {
     const { balance, symbol, decimals } = await getTokenBalance(provider, tokenAddress, walletAddress);
     const usd = parseFloat(ethers.formatUnits(balance, decimals));
     return { balance, symbol, decimals, usd, tokenAddress, chainId };
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
-// vaultをフィルタリング
+// ─── Vault Filter ─────────────────────────────────────────────────────────────
+
 function filterVaults(ranked, { minApy, mode } = {}) {
   let filtered = minApy ? ranked.filter(v => v.apy >= minApy) : [...ranked];
   if (mode === 'safest') {
@@ -156,7 +118,8 @@ function filterVaults(ranked, { minApy, mode } = {}) {
   return filtered;
 }
 
-// メインフロー
+// ─── Main Flow ────────────────────────────────────────────────────────────────
+
 async function run(instruction, walletAddress) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
@@ -165,49 +128,44 @@ async function run(instruction, walletAddress) {
     console.log('===================');
     console.log(`📝 Instruction: "${instruction}"`);
 
-    // ステップ1: 自然言語解析
+    // Step 1: Parse natural language instruction
     console.log('\n🧠 Parsing instruction...');
     let params;
     try {
       params = await parseInstruction(instruction);
       console.log(`  Asset: ${params.asset || 'USDC'} | From: ${params.fromChainId ? getChainName(params.fromChainId) : 'auto'} | To: ${params.chainId ? getChainName(params.chainId) : 'any'} | Min APY: ${params.minApy || 'any'}% | Amount: ${params.amount ? '$' + params.amount : 'all'} | Mode: ${params.mode || 'balanced'}`);
-    } catch (e) {
+    } catch {
       console.log('  ⚠️  Could not parse instruction, using defaults');
       params = { asset: 'USDC', fromChainId: null, chainId: null, minApy: null, amount: null, mode: 'balanced' };
     }
 
     const asset = params.asset || 'USDC';
 
-    // ステップ2: 残高確認
-    // 優先順位:
-    // 1. fromChainId指定あり → そのチェーンのみ
-    // 2. fromChainId未指定 + chainId指定あり → 目的チェーンを先に確認、なければ全スキャン
-    // 3. 両方未指定 → 全スキャン
+    // Step 2: Resolve balance
+    // Priority:
+    //   1. fromChainId specified → use that chain only
+    //   2. chainId specified, no fromChainId → check destination first, then scan all
+    //   3. Neither specified → scan all chains
     console.log(`\n💰 Checking ${asset} balance...`);
     let balanceInfo = null;
 
     if (params.fromChainId) {
-      // ケース1: fromChain明示指定
       balanceInfo = await checkBalance(params.fromChainId, walletAddress);
       if (balanceInfo && balanceInfo.usd > 0.01) {
         console.log(`  ${getChainName(params.fromChainId)}: ${balanceInfo.usd.toFixed(4)} ${asset}`);
       } else {
         console.log(`  ❌ No ${asset} found on ${getChainName(params.fromChainId)}`);
-        rl.close();
-        return;
+        rl.close(); return;
       }
     } else if (params.chainId) {
-      // ケース2: 目的チェーン指定あり → そのチェーンを先に確認
       const b = await checkBalance(params.chainId, walletAddress);
       if (b && b.usd > 0.01) {
-        // 目的チェーンに残高あり → 同チェーンdeposit
         balanceInfo = b;
         console.log(`  ${getChainName(params.chainId)}: ${b.usd.toFixed(4)} ${asset}`);
       } else {
-        // 目的チェーンに残高なし → 全スキャンして最大残高チェーンを使う
         console.log(`  ${getChainName(params.chainId)}: no balance — scanning all chains...`);
         for (const chainId of getScanChainIds()) {
-          if (chainId === params.chainId) continue; // 既に確認済み
+          if (chainId === params.chainId) continue;
           const b2 = await checkBalance(chainId, walletAddress);
           if (b2 && b2.usd > 0.01) {
             if (!balanceInfo || b2.usd > balanceInfo.usd) balanceInfo = b2;
@@ -216,7 +174,6 @@ async function run(instruction, walletAddress) {
         }
       }
     } else {
-      // ケース3: 全スキャン
       for (const chainId of getScanChainIds()) {
         const b = await checkBalance(chainId, walletAddress);
         if (b && b.usd > 0.01) {
@@ -228,26 +185,24 @@ async function run(instruction, walletAddress) {
 
     if (!balanceInfo || balanceInfo.usd < 0.01) {
       console.log(`\n❌ No ${asset} balance found. Cannot proceed.`);
-      rl.close();
-      return;
+      rl.close(); return;
     }
 
     const depositAmount = params.amount ? Math.min(params.amount, balanceInfo.usd) : balanceInfo.usd;
-    const fromChainId = balanceInfo.chainId;
+    const fromChainId   = balanceInfo.chainId;
     console.log(`\n  Using: $${depositAmount.toFixed(2)} ${asset} from ${getChainName(fromChainId)}`);
 
-    // ステップ3: vault検索（chainIdは目的チェーン）
+    // Step 3: Search vaults
     console.log(`\n🔍 Searching vaults...`);
-    const allVaults = await getVaults({ asset, minTvlUsd: 500000 });
-
+    const allVaults  = await getVaults({ asset, minTvlUsd: 500000 });
     const chainVaults = params.chainId
       ? allVaults.filter(v => v.chainId === params.chainId)
       : allVaults;
 
-    let ranked = rankVaults(chainVaults, depositAmount, fromChainId);
+    let ranked   = rankVaults(chainVaults, depositAmount, fromChainId);
     let filtered = filterVaults(ranked, { minApy: params.minApy, mode: params.mode });
 
-    // ステップ4: フォールバック処理
+    // Step 4: Vault selection with fallback
     let selectedVault = null;
 
     if (filtered.length > 0) {
@@ -275,13 +230,11 @@ async function run(instruction, walletAddress) {
             selectedVault = fallback2[0];
           } else {
             console.log('\n❌ No suitable vault accepted. Exiting.');
-            rl.close();
-            return;
+            rl.close(); return;
           }
         } else {
           console.log(`\n❌ No vault found with APY >= ${params.minApy}% across all chains.`);
-          rl.close();
-          return;
+          rl.close(); return;
         }
       }
     } else {
@@ -290,11 +243,10 @@ async function run(instruction, walletAddress) {
 
     if (!selectedVault) {
       console.log('\n❌ No suitable vault found. Exiting.');
-      rl.close();
-      return;
+      rl.close(); return;
     }
 
-    // ステップ5: 条件提示
+    // Step 5: Present proposal
     const needsBridge = fromChainId !== selectedVault.vault.chainId;
     console.log(`\n📋 Vault Proposal:`);
     console.log(`  Vault     : ${selectedVault.vault.name} (${selectedVault.vault.protocol})`);
@@ -306,36 +258,33 @@ async function run(instruction, walletAddress) {
     console.log(`  Gas est.  : $${selectedVault.totalGasCost.toFixed(2)}${needsBridge ? ' (incl. bridge)' : ''}`);
     console.log(`  Net yield : $${selectedVault.netYield.toFixed(2)}/year`);
 
-    // ステップ6: ユーザー確認
+    // Step 6: Confirm
     const confirm = await prompt(rl, '\n✅ Proceed with deposit? (y/n): ');
     if (confirm.toLowerCase() !== 'y') {
       console.log('\n❌ Deposit cancelled.');
-      rl.close();
-      return;
+      rl.close(); return;
     }
 
-    // ステップ7: deposit実行
+    // Step 7: Execute
     console.log('\n🚀 Executing deposit...');
     const pk = process.env.PRIVATE_KEY;
     if (!pk) throw new Error('PRIVATE_KEY not set');
 
-    const provider = await getProviderWithFallback(fromChainId);
-    const signer = new ethers.Wallet(pk, provider);
+    const provider  = await getProviderWithFallback(fromChainId);
+    const signer    = new ethers.Wallet(pk, provider);
     const amountWei = ethers.parseUnits(depositAmount.toFixed(6), balanceInfo.decimals);
 
     const result = await depositToVault({
       signer,
       fromChainId,
-      toChainId: selectedVault.vault.chainId,
-      fromTokenAddress: balanceInfo.tokenAddress,
-      vaultTokenAddress: selectedVault.vault.address,
-      amountWei: amountWei.toString(),
-      depositPack: selectedVault.vault.depositPacks?.[0]?.name || '',
+      toChainId:          selectedVault.vault.chainId,
+      fromTokenAddress:   balanceInfo.tokenAddress,
+      vaultTokenAddress:  selectedVault.vault.address,
+      amountWei:          amountWei.toString(),
+      depositPack:        selectedVault.vault.depositPacks?.[0]?.name || '',
     });
 
-    // deposit成功後にpositions.jsonに記録
     recordPosition(selectedVault.vault, selectedVault.vault.chainId);
-
     console.log('\n🎉 Deposit complete! Stay Vaulthoric.');
     rl.close();
     return result;
@@ -346,7 +295,8 @@ async function run(instruction, walletAddress) {
   }
 }
 
-// CLI
+// ─── CLI ──────────────────────────────────────────────────────────────────────
+
 async function main() {
   const instruction = process.argv.slice(2).join(' ');
   if (!instruction) {

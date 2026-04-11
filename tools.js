@@ -1,9 +1,44 @@
 // Vaulthoric — Chain & Token Configuration
-// 全チェーン・トークン・RPC設定の一元管理
+// Central registry for chains, tokens, ABIs, position helpers, and utilities.
 
 require('dotenv').config();
 
-// チェーン情報（RPCは優先順にフォールバック）
+const fs   = require('fs');
+const path = require('path');
+
+// ─── Shared ABIs ─────────────────────────────────────────────────────────────
+
+const ERC20_ABI = [
+  'function approve(address spender, uint256 amount) returns (bool)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function balanceOf(address owner) view returns (uint256)',
+  'function decimals() view returns (uint8)',
+  'function symbol() view returns (string)',
+];
+
+const ERC4626_ABI = [
+  'function deposit(uint256 assets, address receiver) returns (uint256 shares)',
+  'function redeem(uint256 shares, address receiver, address owner) returns (uint256 assets)',
+];
+
+const AAVE_POOL_ABI = [
+  'function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)',
+  'function withdraw(address asset, uint256 amount, address to) returns (uint256)',
+];
+
+// ─── Aave v3 Pool Addresses ───────────────────────────────────────────────────
+
+const AAVE_POOLS = {
+  1:     '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2', // Ethereum
+  10:    '0x794a61358D6845594F94dc1DB02A252b5b4814aD', // Optimism
+  137:   '0x794a61358D6845594F94dc1DB02A252b5b4814aD', // Polygon
+  8453:  '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5', // Base
+  42161: '0x794a61358D6845594F94dc1DB02A252b5b4814aD', // Arbitrum
+  143:   '0x80f00661b13cc5f6ccd3885be7b4c9c67545d585', // Monad (Neverland)
+};
+
+// ─── Chain Configuration ──────────────────────────────────────────────────────
+
 const CHAINS = {
   1: {
     name: 'Ethereum', network: 'ethereum',
@@ -143,7 +178,7 @@ const CHAINS = {
   },
 };
 
-// 残高スキャン対象チェーン（安定してるチェーンのみ）
+// Chains included in idle-balance scans (stable public RPCs only)
 const SCAN_CHAIN_IDS = [
   1,      // Ethereum
   10,     // Optimism
@@ -155,11 +190,13 @@ const SCAN_CHAIN_IDS = [
   59144,  // Linea
   534352, // Scroll
   130,    // Unichain
+  143,    // Monad
   146,    // Sonic
   5000,   // Mantle
 ];
 
-// USDC token addresses per chain
+// ─── USDC Addresses ───────────────────────────────────────────────────────────
+
 const USDC_ADDRESSES = {
   1:      '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
   10:     '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85',
@@ -180,48 +217,47 @@ const USDC_ADDRESSES = {
   747474: '0x203C7Dd982b9255c3E17b49e44B42de27A0B4C24',
 };
 
-// チェーン名→IDのマッピング（自然言語解析用）
+// ─── Chain Name Aliases ───────────────────────────────────────────────────────
+
 const CHAIN_NAME_TO_ID = Object.fromEntries(
   Object.entries(CHAINS).map(([id, c]) => [c.name.toLowerCase(), parseInt(id)])
 );
-CHAIN_NAME_TO_ID['eth'] = 1;
+CHAIN_NAME_TO_ID['eth']     = 1;
 CHAIN_NAME_TO_ID['mainnet'] = 1;
-CHAIN_NAME_TO_ID['op'] = 10;
-CHAIN_NAME_TO_ID['arb'] = 42161;
-CHAIN_NAME_TO_ID['avax'] = 43114;
-CHAIN_NAME_TO_ID['matic'] = 137;
+CHAIN_NAME_TO_ID['op']      = 10;
+CHAIN_NAME_TO_ID['arb']     = 42161;
+CHAIN_NAME_TO_ID['avax']    = 43114;
+CHAIN_NAME_TO_ID['matic']   = 137;
 
-// ヘルパー関数
+// ─── RPC Helpers ──────────────────────────────────────────────────────────────
+
 function getChainName(chainId) {
   return CHAINS[chainId]?.name || `chain_${chainId}`;
 }
 
-// 最初のRPCを返す（フォールバックはgetProvider側で処理）
 function getChainRpc(chainId) {
   return CHAINS[chainId]?.rpcs?.[0] || null;
 }
 
-// 複数RPCを順番に試してProviderを返す（eth_callまで確認）
+function getChainRpcs(chainId) {
+  return CHAINS[chainId]?.rpcs || [];
+}
+
+// Try each RPC in order; verify both getBlockNumber and eth_call before returning.
 async function getProviderWithFallback(chainId) {
   const { ethers } = require('ethers');
   const rpcs = getChainRpcs(chainId);
   for (const rpc of rpcs) {
     try {
-      const provider = new ethers.JsonRpcProvider(rpc, undefined, { staticNetwork: true });
+      const provider = new ethers.JsonRpcProvider(rpc, undefined, { staticNetwork: true, polling: false });
       await provider.getBlockNumber();
-      // eth_callも確認（getBlockNumberは通るのにeth_callが壊れてるRPCがある）
       await provider.getCode('0x000000000000000000000000000000000000dEaD');
       return provider;
-    } catch (e) {
-      // 次のRPCを試す
+    } catch {
+      // try next
     }
   }
   throw new Error(`No working RPC for chainId ${chainId}`);
-}
-
-// 全RPCリストを返す
-function getChainRpcs(chainId) {
-  return CHAINS[chainId]?.rpcs || [];
 }
 
 function getChainIdByName(name) {
@@ -240,11 +276,77 @@ function getScanChainIds() {
   return SCAN_CHAIN_IDS;
 }
 
+// ─── Position Helpers ─────────────────────────────────────────────────────────
+
+const POSITIONS_FILE = path.join(__dirname, 'positions.json');
+
+function loadPositions() {
+  try {
+    if (fs.existsSync(POSITIONS_FILE)) {
+      return JSON.parse(fs.readFileSync(POSITIONS_FILE, 'utf8'));
+    }
+  } catch {}
+  return [];
+}
+
+function savePositions(positions) {
+  fs.writeFileSync(POSITIONS_FILE, JSON.stringify(positions, null, 2));
+}
+
+// Record a successful deposit to positions.json (idempotent).
+function recordPosition(vault, chainId) {
+  const positions = loadPositions();
+  const key = `${chainId}-${vault.address.toLowerCase()}`;
+  if (!positions.find(p => `${p.chainId}-${p.address.toLowerCase()}` === key)) {
+    positions.push({
+      address:     vault.address,
+      chainId,
+      protocol:    vault.protocol,
+      name:        vault.name,
+      symbol:      vault.underlyingTokens?.[0]?.symbol || 'USDC',
+      decimals:    18,
+      depositPack: vault.depositPacks?.[0]?.name || '',
+      addedAt:     new Date().toISOString(),
+    });
+    savePositions(positions);
+    console.log(`📝 Position recorded: ${vault.name} on chain ${chainId}`);
+  }
+}
+
+// ─── Noise Suppression ────────────────────────────────────────────────────────
+
+const RPC_NOISE = ['JsonRpcProvider failed', 'retry in 1s'];
+
+// Suppress ethers.js internal RPC retry logs from stdout and stderr.
+// Call once at process startup (idempotent guard via _rpcNoiseSuppressed flag).
+function suppressRpcNoise() {
+  if (process._rpcNoiseSuppressed) return;
+  process._rpcNoiseSuppressed = true;
+
+  const filter = (original) => (chunk, ...args) => {
+    if (RPC_NOISE.some(s => chunk.toString().includes(s))) return true;
+    return original(chunk, ...args);
+  };
+
+  process.stdout.write = filter(process.stdout.write.bind(process.stdout));
+  process.stderr.write = filter(process.stderr.write.bind(process.stderr));
+}
+
+// ─── Exports ──────────────────────────────────────────────────────────────────
+
 module.exports = {
-  CHAINS,
+  // ABIs
+  ERC20_ABI,
+  ERC4626_ABI,
+  AAVE_POOL_ABI,
+  // Addresses
+  AAVE_POOLS,
   USDC_ADDRESSES,
-  CHAIN_NAME_TO_ID,
+  // Chain config
+  CHAINS,
   SCAN_CHAIN_IDS,
+  CHAIN_NAME_TO_ID,
+  // RPC helpers
   getChainName,
   getChainRpc,
   getChainRpcs,
@@ -253,4 +355,11 @@ module.exports = {
   getUsdcAddress,
   getSupportedChainIds,
   getScanChainIds,
+  // Position helpers
+  POSITIONS_FILE,
+  loadPositions,
+  savePositions,
+  recordPosition,
+  // Utilities
+  suppressRpcNoise,
 };
