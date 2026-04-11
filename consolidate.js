@@ -20,7 +20,7 @@ const {
   recordPosition,
   suppressRpcNoise,
 } = require('./tools');
-const { ensureAllowance, pollStatus } = require('./composer');
+const { ensureAllowance, pollStatus, sendTx } = require('./composer');
 
 suppressRpcNoise();
 
@@ -127,14 +127,9 @@ async function executeBridge({ fromChainId, toChainId, quote, wallet }) {
     await ensureAllowance(signer, fromUsdc, quote.estimate.approvalAddress, quote.action.fromAmount);
   }
 
-  const txReq = quote.transactionRequest;
-  const tx = await signer.sendTransaction({
-    to:       txReq.to,
-    data:     txReq.data,
-    value:    txReq.value ? BigInt(txReq.value) : 0n,
-    gasLimit: txReq.gasLimit ? BigInt(Math.floor(Number(txReq.gasLimit) * 1.2)) : undefined,
-  });
-  await tx.wait();
+  // Use sendTx from composer.js to get current fee data + 20% buffer,
+  // instead of using potentially stale gas values from the LI.FI quote.
+  const tx = await sendTx(signer, quote.transactionRequest);
   console.log(`  🔗 ${getChainName(fromChainId)} tx: ${tx.hash}`);
   return {
     txHash:      tx.hash,
