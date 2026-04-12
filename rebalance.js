@@ -14,6 +14,7 @@ const {
   getUsdcAddress,
   getProviderWithFallback,
   suppressRpcNoise,
+  recordTx,
 } = require('./tools');
 const { scanPositions, withdrawAll } = require('./withdraw');
 
@@ -344,6 +345,7 @@ async function main() {
       depositPack:       best.vault.depositPacks?.[0]?.name || '',
     });
     recordPosition(best.vault, best.vault.chainId);
+    recordTx({ type:'rebalance', fromVault: position.vaultName, toVault: best.vault.name, chainId: best.vault.chainId, valueUsd: position.valueUsd });
     console.log(`\n🎉 Rebalance complete! Stay Vaulthoric.`);
     console.log(`\n🤖 Vaulthoric will monitor your position and notify you`);
     console.log(`   if better yield opportunities appear.`);

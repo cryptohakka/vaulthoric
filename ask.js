@@ -19,6 +19,7 @@ const {
   CHAIN_NAME_TO_ID,
   recordPosition,
   suppressRpcNoise,
+  recordTx,
 } = require('./tools');
 
 suppressRpcNoise();
@@ -541,6 +542,7 @@ async function run(instruction, walletAddress) {
             depositPack:       candidate.vault.depositPacks?.[0]?.name || '',
           });
           recordPosition(candidate.vault, toChainId);
+          recordTx({ type:'consolidate', toVault: candidate.vault.name, toChainId: toChainId, valueUsd: depositAmount });
           console.log('\n🎉 Consolidate + deposit complete!');
           console.log('\n🤖 Vaulthoric will monitor your position and notify you');
           console.log('   if better yield opportunities appear. Stay Vaulthoric.');
@@ -592,6 +594,7 @@ async function run(instruction, walletAddress) {
           depositPack:       candidate.vault.depositPacks?.[0]?.name || '',
         });
         recordPosition(candidate.vault, candidate.vault.chainId);
+        recordTx({ type:'deposit', toVault: candidate.vault.name, toChainId: candidate.vault.chainId, valueUsd: depositAmount });
         console.log('\n🎉 Deposit complete!');
         console.log('\n🤖 Vaulthoric will monitor your position and notify you');
         console.log('   if better yield opportunities appear. Stay Vaulthoric.');

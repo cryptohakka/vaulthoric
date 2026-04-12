@@ -140,7 +140,7 @@ app.get('/api/monitor-log', (req, res) => {
 
     for (const line of lines) {
       if (line.includes('🤖 Vaulthoric Monitor —')) {
-        if (current) runs.unshift(current); // prepend so newest first
+        if (current) runs.push(current);
         const timeMatch = line.match(/(\d{4}-\d{2}-\d{2}T[\d:.Z]+)/);
         const rawTime = timeMatch ? new Date(timeMatch[1]) : null;
         current = {
@@ -153,30 +153,53 @@ app.get('/api/monitor-log', (req, res) => {
       if (!current) continue;
       current.rawLines.push(line);
 
-      // Detect alert start
-      if (line.includes('🚀 Better vault found')) {
-        current.aData = {};
-        const m = line.match(/Better vault found: (.+?) \(/);
-        if (m) current.aData.betterName = m[1];
-        const imp = line.match(/\+([0-9.]+)%/);
-        if (imp) current.aData.improvement = imp[1];
+      // Detect position being checked (current vault name)
+      const posMatch = line.match(/Current APY: ([0-9.]+)%\s*\|\s*Best available: ([0-9.]+)%/);
+      if (posMatch && current.aData) {
+        current.aData.currentApy = posMatch[1];
+        current.aData.bestApy = posMatch[2];
       }
+
+      // Detect alert: both formats
+      // Old: "Better vault found: NAME (+X%)" 
+      // New: "Better vault found: NAME (0xaddr) +X%"
+      if (line.includes('🚀 Better vault found')) {
+        current.aData = current.aData || {};
+        // New format: NAME (0xaddr…) +X%
+        let m = line.match(/Better vault found: (.+?)\s*\(0x[^)]+\)\s*\+([0-9.]+)%/);
+        if (!m) {
+          // Old format: NAME (+X%)
+          m = line.match(/Better vault found: (.+?)\s*\(\+([0-9.]+)%\)/);
+        }
+        if (m) {
+          current.aData.betterName = m[1].trim();
+          current.aData.improvement = m[2];
+        }
+      }
+
+      // Cost line
       if (current.aData) {
         const c = line.match(/Est\. cost: (\$[0-9.]+ \([0-9.]+%[^)]+\))/);
         if (c) current.aData.cost = c[1];
         if (line.includes('✅') && line.includes('cost')) current.aData.efficient = true;
         if (line.includes('❌') && line.includes('cost')) current.aData.efficient = false;
         if (/cross.?chain/i.test(line)) current.aData.cross = true;
+        const ai = line.match(/🤖 AI Analysis: (.+)/);
+        if (ai) current.aData.aiAnalysis = ai[1].trim();
       }
-      if (line.includes('📨 Discord notification sent') && current.aData) {
-        current.alerts.push({
-          ...current.aData,
-          query: current.aData.betterName ? `best to ${current.aData.betterName}` : 'best',
-        });
+
+      // "📨 Discord notification sent for VAULTNAME" — commit alert
+      if (line.includes('📨 Discord notification sent')) {
+        if (!current.aData) current.aData = {};
+        // Extract vault name from "sent for VAULTNAME"
+        const vn = line.match(/sent for (\S+)/);
+        if (vn && !current.aData.currentName) current.aData.currentName = vn[1];
+        current.alerts.push({ ...current.aData });
         current.aData = null;
       }
     }
-    if (current) runs.unshift(current);
+    if (current) runs.push(current);
+    runs.reverse(); // newest first
 
     // Clean up internal state field
     for (const r of runs) { delete r.aData; r.rawLines = r.rawLines.filter(Boolean); }
@@ -186,6 +209,26 @@ app.get('/api/monitor-log', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// TX History — read from tx_history.json
+app.get('/api/tx-history', (req, res) => {
+  try {
+    const p = path.join(__dirname, 'tx_history.json');
+    if (!fs.existsSync(p)) return res.json({ txs: [] });
+    const txs = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const formatted = txs.map(t => ({
+      time: t.time ? new Date(t.time).toLocaleString('ja-JP', { timeZone: 'Asia/Tbilisi', month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '—',
+      from: t.fromVault || '—',
+      to:   t.toVault   || '—',
+      chain: t.chainId || t.toChainId || null,
+      chainName: {1:'Ethereum',8453:'Base',10:'Optimism',42161:'Arbitrum',137:'Polygon',59144:'Linea',534352:'Scroll',146:'Sonic',143:'Monad',5000:'Mantle'}[t.chainId||t.toChainId] || String(t.chainId||t.toChainId||'—'),
+      value: t.valueUsd ? String(t.valueUsd) : null,
+      txHash: t.txHash || null,
+      type: t.type || 'tx',
+    }));
+    res.json({ txs: formatted.slice(0, 50) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Positions — scan live balances and clean up positions.json

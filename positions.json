@@ -5,18 +5,18 @@
     "protocol": "aave-v3",
     "name": "USDC",
     "symbol": "USDC",
-    "decimals": 6,
+    "decimals": 18,
     "depositPack": "aave-zaps",
-    "addedAt": "2026-04-11T14:12:31.940Z"
+    "addedAt": "2026-04-12T20:47:03.806Z"
   },
   {
-    "address": "0xbeefa7b88064feef0cee02aaebbd95d30df3878f",
+    "address": "0xbeeff7ae5e00aae3db302e4b0d8c883810a58100",
     "chainId": 8453,
     "protocol": "morpho-v1",
     "name": "BBQUSDC",
     "symbol": "USDC",
     "decimals": 18,
     "depositPack": "morpho-zaps",
-    "addedAt": "2026-04-12T06:05:58.817Z"
+    "addedAt": "2026-04-12T20:59:11.031Z"
   }
 ]

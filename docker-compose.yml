@@ -11,3 +11,4 @@ services:
     volumes:
       - ./positions.json:/app/positions.json
       - ./monitor.log:/app/monitor.log
+      - ./tx_history.json:/app/tx_history.json

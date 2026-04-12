@@ -17,6 +17,7 @@ const {
   loadPositions,
   savePositions,
   suppressRpcNoise,
+  recordTx,
 } = require('./tools');
 const { ensureAllowance, sendTx, pollStatus } = require('./composer');
 
@@ -170,6 +171,7 @@ async function withdrawPosition(position, walletAddress) {
       const receipt = await tx.wait();
       console.log(`✅ Confirmed in block: ${receipt.blockNumber}`);
       rl.close();
+      recordTx({ type:'withdraw', fromVault: position?.name || position?.vaultName, chainId: position?.chainId, valueUsd: position?.valueUsd });
       console.log('\n🎉 Withdrawal complete! Stay Vaulthoric.');
       return;
     }
@@ -189,6 +191,7 @@ async function withdrawPosition(position, walletAddress) {
       const receipt = await tx.wait();
       console.log(`✅ Confirmed in block: ${receipt.blockNumber}`);
       rl.close();
+      recordTx({ type:'withdraw', fromVault: position?.name || position?.vaultName, chainId: position?.chainId, valueUsd: position?.valueUsd });
       console.log('\n🎉 Withdrawal complete! Stay Vaulthoric.');
       return;
     } catch (redeemErr) {
@@ -230,7 +233,8 @@ async function withdrawPosition(position, walletAddress) {
     await pollStatus(tx.hash, position.chainId, position.chainId);
 
     rl.close();
-    console.log('\n🎉 Withdrawal complete! Stay Vaulthoric.');
+    recordTx({ type:'withdraw', fromVault: position?.name || position?.vaultName, chainId: position?.chainId, valueUsd: position?.valueUsd });
+      console.log('\n🎉 Withdrawal complete! Stay Vaulthoric.');
   } catch (e) {
     console.error('\n❌ Error:', e.response?.data?.message || e.message);
     rl.close();
@@ -242,7 +246,7 @@ async function withdrawPosition(position, walletAddress) {
 
 async function withdrawAll(position) {
   const walletAddress = new ethers.Wallet(process.env.PRIVATE_KEY).address;
-  const toToken = USDC_ADDRESSES[position.chainId];
+  const toToken = USDC_ADDRESSES[Number(position.chainId)];
   if (!toToken) throw new Error(`No USDC address for chain ${position.chainId}`);
 
   const provider = await getProviderWithFallback(position.chainId);
@@ -257,6 +261,7 @@ async function withdrawAll(position) {
     console.log(`🔗 Tx hash: ${tx.hash}`);
     const receipt = await tx.wait();
     console.log(`✅ Confirmed in block: ${receipt.blockNumber}`);
+    recordTx({ type:'withdraw', fromVault: position.vaultName, chainId: position.chainId, valueUsd: position.valueUsd, txHash: tx.hash });
     return { success: true, txHash: tx.hash };
   }
 
@@ -269,6 +274,7 @@ async function withdrawAll(position) {
     console.log(`🔗 Tx hash: ${tx.hash}`);
     const receipt = await tx.wait();
     console.log(`✅ Confirmed in block: ${receipt.blockNumber}`);
+    recordTx({ type:'withdraw', fromVault: position.vaultName, chainId: position.chainId, valueUsd: position.valueUsd, txHash: tx.hash });
     return { success: true, txHash: tx.hash };
   } catch (redeemErr) {
     console.log(`  ⚠️  ERC-4626 redeem failed: ${redeemErr.message?.slice(0, 60)}`);
@@ -291,6 +297,7 @@ async function withdrawAll(position) {
   await ensureAllowance(signer, freshQuote.action.fromToken.address, freshQuote.estimate.approvalAddress, freshQuote.action.fromAmount);
   const tx = await sendTx(signer, freshQuote.transactionRequest);
   await pollStatus(tx.hash, position.chainId, position.chainId);
+  recordTx({ type:'withdraw', fromVault: position.vaultName, chainId: position.chainId, valueUsd: position.valueUsd, txHash: tx.hash });
   return { success: true, txHash: tx.hash };
 }
 
@@ -316,7 +323,6 @@ async function main() {
     if (idx === -1) { console.log(`❌ Position "${posArg}" not found.`); return; }
     console.log(`\n⚡ Auto-withdrawing: ${positions[idx].vaultName}`);
     await withdrawAll(positions[idx]);
-    console.log('\n🎉 Withdrawal complete! Stay Vaulthoric.');
     return;
   }
 

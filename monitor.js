@@ -158,6 +158,7 @@ async function main() {
         { name: pos.name, protocol: pos.protocol, apy: current.apy, stability: current.stability },
         best, costUsd, costRatio, isEfficient
       );
+      console.log(`     🤖 AI Analysis: ${reason}`);
       alerts.push({ pos, current, best, improvement, valueUsd, reason, isSameChain, costUsd, costRatio, isEfficient });
     } else {
       console.log(`     ✅ Current vault is optimal`);

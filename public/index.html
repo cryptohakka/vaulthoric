@@ -171,7 +171,7 @@ main{display:flex;flex-direction:column;padding:14px 14px 14px 4px;overflow:hidd
 
 /* Monitor entry card */
 .mon-card{background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r);
-  box-shadow:var(--shadow);overflow:hidden;opacity:0;animation:lf 0.25s ease forwards;}
+  box-shadow:var(--shadow);overflow:hidden;opacity:0;animation:lf 0.25s ease forwards;min-height:44px;flex-shrink:0;}
 .mon-card.alert{border-color:rgba(61,16,196,0.25);}
 .mon-card.good{border-color:rgba(18,183,106,0.25);}
 .mon-card-hdr{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;}
@@ -349,6 +349,7 @@ main{display:flex;flex-direction:column;padding:14px 14px 14px 4px;overflow:hidd
           <div class="log-act"><button class="clr-btn" onclick="clrLog()">Clear</button></div>
         </div>
         <div id="log"></div>
+      </div>
     </div>
   </div>
 
@@ -375,9 +376,16 @@ main{display:flex;flex-direction:column;padding:14px 14px 14px 4px;overflow:hidd
 
   <!-- History Tab -->
   <div class="tab-panel" id="tab-history">
-    <div class="history-empty">
-      <div class="icon">📋</div>
-      <p>Transaction history coming soon</p>
+    <div class="monitor-layout">
+      <div class="monitor-hdr">
+        <div class="monitor-hdr-left">
+          <div class="monitor-hdr-title">📋 Transaction History</div>
+          <div class="monitor-hdr-sub" id="txCount">—</div>
+        </div>
+      </div>
+      <div class="monitor-feed" id="txFeed">
+        <div class="no-pos" style="text-align:center;padding:40px;color:var(--text3)">Loading…</div>
+      </div>
     </div>
   </div>
 
@@ -454,6 +462,7 @@ function switchTab(name,btn){
   document.getElementById('tab-'+name).classList.add('active');
   btn.classList.add('active');
   if(name==='monitor')loadMonitorLog();
+  if(name==='history')loadTxHistory();
 }
 
 // ─── Scenarios ────────────────────────────────────────────────────────────────
@@ -574,7 +583,7 @@ async function go(){
   else if(cur==='consolidate'){
     body={dryRun:uiState.consolidate.dryRun};
   }
-  await fetch('/api/'+cur,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  await fetch('/api/'+cur,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'include'});
 }
 function setR(r){
   running=r;const b=document.getElementById('runBtn');
@@ -586,7 +595,7 @@ function setR(r){
 async function loadPos(){
   const list=document.getElementById('posList');
   try{
-    const p=await(await fetch('/api/positions')).json();
+    const p=await(await fetch('/api/positions',{credentials:'include'})).json();
     window._positions=p;
     if(!p.length){list.innerHTML='<div class="no-pos">No active positions</div>';return;}
     list.innerHTML=p.map(x=>`<div class="pos-item">
@@ -610,7 +619,7 @@ async function loadMonitorLog(){
   const feed=document.getElementById('monFeed');
   feed.innerHTML='<div class="no-pos" style="text-align:center;padding:40px;color:var(--text3)">Loading…</div>';
   try{
-    const res=await fetch('/api/monitor-log');
+    const res=await fetch('/api/monitor-log',{credentials:'include'});
     const {runs,lastRun}=await res.json();
     document.getElementById('monLastRun').textContent=lastRun?'Last run: '+lastRun:'Last run: —';
     if(!runs.length){
@@ -702,6 +711,46 @@ function rbNow(q){
   selSc(rb);
   document.getElementById('qi').value=q;
   setTimeout(go,100);
+}
+
+// ─── TX History ──────────────────────────────────────────────────────────────
+async function loadTxHistory(){
+  const feed=document.getElementById('txFeed');
+  feed.innerHTML='<div class="no-pos" style="text-align:center;padding:40px;color:var(--text3)">Loading…</div>';
+  try{
+    const res=await fetch('/api/tx-history',{credentials:'include'});
+    const {txs}=await res.json();
+    document.getElementById('txCount').textContent=txs.length?txs.length+' transactions':'No transactions yet';
+    if(!txs.length){
+      feed.innerHTML='<div class="no-pos" style="text-align:center;padding:40px;color:var(--text3)">No completed rebalances found.</div>';
+      return;
+    }
+    feed.innerHTML='';
+    const EXPLORERS={1:'https://etherscan.io/tx/',8453:'https://basescan.org/tx/',10:'https://optimistic.etherscan.io/tx/',42161:'https://arbiscan.io/tx/',137:'https://polygonscan.com/tx/',59144:'https://lineascan.build/tx/',534352:'https://scrollscan.com/tx/',146:'https://sonicscan.org/tx/',143:'https://testnet.monadexplorer.com/tx/'};
+    for(const tx of txs){
+      const el=document.createElement('div');
+      el.className='mon-card good';
+      const short=tx.txHash?tx.txHash.slice(0,10)+'…'+tx.txHash.slice(-6):'—';
+      el.innerHTML=`
+        <div class="mon-card-hdr" style="cursor:default">
+          <span class="mon-time">${tx.time||'—'}</span>
+          <span class="mon-badge good">${tx.type==='withdraw'?'💸 Withdraw':tx.type==='deposit'?'📥 Deposit':tx.type==='consolidate'?'🔗 Consolidate':'⚖️ Rebalance'}</span>
+          <span class="mon-summary">${tx.type==='withdraw'?'Withdrew '+tx.from:tx.type==='deposit'?'Deposited into '+tx.to:tx.from&&tx.to?tx.from+' → '+tx.to:tx.to||tx.from||'—'}${tx.value?' ($'+parseFloat(tx.value).toFixed(2)+')':''}</span>
+        </div>
+        <div class="mon-detail open" style="padding:10px 14px;">
+          <div class="mon-grid">
+            <div class="mf"><label>From</label><span>${tx.from||'—'}</span></div>
+            <div class="mf"><label>To</label><span class="a">${tx.to||'—'}</span></div>
+            <div class="mf"><label>Value</label><span>${tx.value?'$'+tx.value:'—'}</span></div>
+            <div class="mf"><label>Chain</label><span>${tx.chainName||tx.chain||'—'}</span></div>
+          </div>
+          ${tx.txHash?`<div style="font-size:12px;margin-top:4px;"><a href="${EXPLORERS[tx.chain]||'https://etherscan.io/tx/'}${tx.txHash}" target="_blank" style="color:var(--accent);font-family:var(--mono)">${short}</a></div>`:''}
+        </div>`;
+      feed.appendChild(el);
+    }
+  }catch(e){
+    feed.innerHTML='<div class="no-pos" style="text-align:center;padding:40px;color:var(--text3)">Could not load history</div>';
+  }
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────

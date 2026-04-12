@@ -334,6 +334,29 @@ function suppressRpcNoise() {
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
+// ─── TX History ───────────────────────────────────────────────────────────────
+const TX_HISTORY_FILE = path.join(__dirname, 'tx_history.json');
+
+function recordTx({ type, fromVault, toVault, chainId, fromChainId, toChainId, valueUsd, txHash, txHash2 }) {
+  let history = [];
+  try { history = JSON.parse(fs.readFileSync(TX_HISTORY_FILE, 'utf8')); } catch {}
+  history.unshift({
+    time: new Date().toISOString(),
+    type,
+    fromVault: fromVault || null,
+    toVault:   toVault   || null,
+    chainId:   chainId   || null,
+    fromChainId: fromChainId || null,
+    toChainId:   toChainId   || null,
+    valueUsd:  valueUsd  || null,
+    txHash:    txHash    || null,
+    txHash2:   txHash2   || null,
+  });
+  history = history.slice(0, 200);
+  fs.writeFileSync(TX_HISTORY_FILE, JSON.stringify(history, null, 2));
+}
+
+
 module.exports = {
   // ABIs
   ERC20_ABI,
@@ -342,15 +365,10 @@ module.exports = {
   // Addresses
   AAVE_POOLS,
   USDC_ADDRESSES,
-  // Chain config
-  CHAINS,
-  SCAN_CHAIN_IDS,
   CHAIN_NAME_TO_ID,
-  // RPC helpers
-  getChainName,
-  getChainRpc,
-  getChainRpcs,
+  // Chain helpers
   getProviderWithFallback,
+  getChainName,
   getChainIdByName,
   getUsdcAddress,
   getSupportedChainIds,
@@ -362,4 +380,5 @@ module.exports = {
   recordPosition,
   // Utilities
   suppressRpcNoise,
+  recordTx,
 };
