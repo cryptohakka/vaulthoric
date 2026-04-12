@@ -12,11 +12,9 @@ const {
   getChainName,
   getUsdcAddress,
   getProviderWithFallback,
-  loadPositions,
   suppressRpcNoise,
 } = require('./tools');
 const { scanPositions, withdrawAll } = require('./withdraw');
-const { run: askRun }               = require('./ask');
 
 suppressRpcNoise();
 
@@ -28,7 +26,7 @@ function prompt(rl, q) {
 
 async function parseRebalanceInstruction(instruction) {
   const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-  const OPENROUTER_MODEL   = process.env.OPENROUTER_MODEL || 'google/gemini-flash-1.5';
+  const OPENROUTER_MODEL   = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash-lite';
   if (!OPENROUTER_API_KEY || !instruction) return null;
 
   const axios = require('axios');
@@ -40,7 +38,21 @@ async function parseRebalanceInstruction(instruction) {
       messages: [
         {
           role:    'system',
-          content: 'Extract rebalance parameters from the instruction. Return JSON only, no explanation: {"from": "VAULT_NAME", "to": "VAULT_NAME_or_best"}. Examples: "CSUSDC to STEAKUSDC" -> {"from":"CSUSDC","to":"STEAKUSDC"}. "BBQUSDC to best" -> {"from":"BBQUSDC","to":"best"}. If destination is best/optimal/highest, always use "best".',
+          content: `Extract rebalance parameters from the instruction. Return JSON only, no explanation:
+{"from": "VAULT_NAME", "to": "VAULT_NAME_or_mode"}
+
+Rules for "to" field:
+- If destination is a specific vault name or address, use it as-is
+- If destination means best risk-adjusted / optimal / balanced → use "best"
+- If destination means safest / lowest risk / most stable → use "safest"
+- If destination means highest yield / highest APY / most aggressive → use "highest"
+
+Examples:
+"CSUSDC to STEAKUSDC" -> {"from":"CSUSDC","to":"STEAKUSDC"}
+"BBQUSDC to best" -> {"from":"BBQUSDC","to":"best"}
+"BBQUSDC to safest" -> {"from":"BBQUSDC","to":"safest"}
+"USDC to highest yield" -> {"from":"USDC","to":"highest"}
+"BBQUSDC to 0x1234..." -> {"from":"BBQUSDC","to":"0x1234..."}`,
         },
         { role: 'user', content: instruction },
       ],
@@ -60,31 +72,60 @@ async function parseRebalanceInstruction(instruction) {
 
 // ─── Find Better Vault ────────────────────────────────────────────────────────
 
-async function findBetterVault(position, valueUsd) {
-  const allVaults     = await getVaults({ asset: 'USDC', minTvlUsd: 500000 });
-  const sameChain     = allVaults.filter(v => v.chainId === position.chainId);
-  const ranked        = rankVaults(sameChain, valueUsd, position.chainId);
+// scope:
+//   'same'  — same-chain only (--auto)
+//   'all'   — all chains (address specified)
+//   'both'  — same-chain best + cross-chain best (mode specified, interactive)
+async function findBetterVault(position, valueUsd, mode = 'best', scope = 'same') {
+  const allVaults = await getVaults({ asset: 'USDC', minTvlUsd: 500000 });
 
+  function sortByMode(ranked) {
+    if (mode === 'safest')  return [...ranked].sort((a, b) => (b.stability * b.trust) - (a.stability * a.trust));
+    if (mode === 'highest') return [...ranked].sort((a, b) => b.apy - a.apy);
+    return ranked; // 'best': risk-adjusted score
+  }
+
+  function excludeCurrent(ranked) {
+    return ranked.filter(v => v.vault.address.toLowerCase() !== position.vaultAddress.toLowerCase());
+  }
+
+  if (scope === 'all') {
+    const ranked  = sortByMode(rankVaults(allVaults, valueUsd, position.chainId));
+    const current = ranked.find(v => v.vault.address.toLowerCase() === position.vaultAddress.toLowerCase());
+    return { current, bestSame: null, bestCross: null, ranked };
+  }
+
+  if (scope === 'both') {
+    const sameChain  = allVaults.filter(v => v.chainId === position.chainId);
+    const crossChain = allVaults.filter(v => v.chainId !== position.chainId);
+    const rankedSame  = sortByMode(rankVaults(sameChain,  valueUsd, position.chainId));
+    const rankedCross = sortByMode(rankVaults(crossChain, valueUsd, position.chainId));
+    const current   = rankedSame.find(v => v.vault.address.toLowerCase() === position.vaultAddress.toLowerCase());
+    const bestSame  = excludeCurrent(rankedSame)[0]  || null;
+    const bestCross = rankedCross[0] || null;
+    return { current, bestSame, bestCross, ranked: rankedSame };
+  }
+
+  // scope === 'same'
+  const ranked  = sortByMode(rankVaults(allVaults.filter(v => v.chainId === position.chainId), valueUsd, position.chainId));
   const current = ranked.find(v => v.vault.address.toLowerCase() === position.vaultAddress.toLowerCase());
-  const best    = ranked.filter(v => v.vault.address.toLowerCase() !== position.vaultAddress.toLowerCase())[0];
-
-  return { current, best, ranked };
+  const best    = excludeCurrent(ranked)[0] || null;
+  return { current, bestSame: best, bestCross: null, ranked };
 }
 
 // ─── Wait for USDC ────────────────────────────────────────────────────────────
 
 async function waitForUsdc(chainId, walletAddress, expectedMin, maxWaitMs = 30000) {
-  const ERC20_ABI  = ['function balanceOf(address) view returns (uint256)'];
-  const usdcAddr   = getUsdcAddress(chainId);
-  const provider   = await getProviderWithFallback(chainId);
-  const { ethers: e } = require('ethers');
-  const token      = new e.Contract(usdcAddr, ERC20_ABI, provider);
+  const ERC20_ABI = ['function balanceOf(address) view returns (uint256)'];
+  const usdcAddr  = getUsdcAddress(chainId);
+  const provider  = await getProviderWithFallback(chainId);
+  const token     = new ethers.Contract(usdcAddr, ERC20_ABI, provider);
 
   console.log(`\n⏳ Waiting for USDC to arrive on ${getChainName(chainId)}...`);
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     const bal = await token.balanceOf(walletAddress);
-    const usd = parseFloat(e.formatUnits(bal, 6));
+    const usd = parseFloat(ethers.formatUnits(bal, 6));
     if (usd >= expectedMin * 0.95) {
       console.log(`  💰 ${usd.toFixed(4)} USDC available`);
       return usd;
@@ -95,6 +136,8 @@ async function waitForUsdc(chainId, walletAddress, expectedMin, maxWaitMs = 3000
 }
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
+
+const MODES = ['best', 'safest', 'highest'];
 
 async function main() {
   const walletAddress = new ethers.Wallet(process.env.PRIVATE_KEY).address;
@@ -132,7 +175,7 @@ async function main() {
   const allVaults = await getVaults({ asset: 'USDC', minTvlUsd: 500000 });
 
   // Enrich with current APY
-  const enriched = positions.map((p, i) => {
+  const enriched = positions.map(p => {
     const ranked  = rankVaults(allVaults.filter(v => v.chainId === p.chainId), p.valueUsd, p.chainId);
     const current = ranked.find(v => v.vault.address.toLowerCase() === p.vaultAddress.toLowerCase());
     return { ...p, currentApy: current?.apy || null, ranked, current };
@@ -165,14 +208,22 @@ async function main() {
     position = enriched[idx];
   }
 
-  // Step 2: Find better vault
-  console.log(`\n🔍 Finding better vault for ${position.vaultName}...`);
-  const { current, best: bestAuto, ranked } = await findBetterVault(position, position.valueUsd);
+  // Determine mode and scope
+  const isSpecificTarget = autoTo && !MODES.includes(autoTo);
+  const isModeTarget     = autoTo && MODES.includes(autoTo);
+  const mode  = (!isAuto && isModeTarget) ? autoTo : 'best';
+  const scope = isAuto ? 'same' : isSpecificTarget ? 'all' : isModeTarget ? 'both' : 'same';
 
-  // If specific target vault specified, find it in ranked list
-  // Supports both vault address (0x...) and vault name
-  let best = bestAuto;
-  if (autoTo && autoTo !== 'best') {
+  // Step 2: Find better vault
+  const modeLabel = mode === 'safest' ? '🛡️  Safest' : mode === 'highest' ? '🚀 Highest yield' : '⚖️  Best risk-adjusted';
+  console.log(`\n🔍 Finding better vault for ${position.vaultName} (mode: ${mode})...`);
+  const { current, bestSame, bestCross, ranked } = await findBetterVault(position, position.valueUsd, mode, scope);
+
+  // Resolve target vault
+  let best = bestSame;
+
+  if (isSpecificTarget) {
+    // アドレスまたは名前で指定されたvaultを全チェーンから探す
     const isAddress = autoTo.startsWith('0x') && autoTo.length >= 10;
     const specified = isAddress
       ? ranked.find(v => v.vault.address.toLowerCase() === autoTo.toLowerCase())
@@ -180,27 +231,43 @@ async function main() {
 
     if (specified) {
       best = specified;
-      console.log(`  Using specified vault: ${best.vault.name} (${best.vault.address.slice(0,6)}…${best.vault.address.slice(-4)})`);
+      console.log(`  Using specified vault: ${best.vault.name} (${best.vault.address.slice(0,6)}…${best.vault.address.slice(-4)}) on ${getChainName(best.vault.chainId)}`);
     } else {
-      console.log(`  ⚠️  "${autoTo}" not found in ranked vaults, using best available`);
+      console.log(`  ⚠️  "${autoTo}" not found, using best available`);
     }
+
+  } else if (isModeTarget && !isAuto && bestCross) {
+    // mode指定 — same-chainとcross-chainの候補を提示
+    console.log(`\n${modeLabel} candidates:`);
+    if (bestSame) {
+      console.log(`  1. [Same-chain ] ${bestSame.vault.name.padEnd(14)} (${bestSame.vault.protocol}) | APY: ${bestSame.apy.toFixed(2)}% | ${getChainName(bestSame.vault.chainId)}`);
+    } else {
+      console.log(`  1. [Same-chain ] No better vault on same chain`);
+    }
+    console.log(`  2. [Cross-chain] ${bestCross.vault.name.padEnd(14)} (${bestCross.vault.protocol}) | APY: ${bestCross.apy.toFixed(2)}% | ${getChainName(bestCross.vault.chainId)}`);
+
+    const pick = await prompt(rl, '\nSelect target (1/2) or q to quit: ');
+    if (pick.toLowerCase() === 'q') { rl.close(); return; }
+    best = pick === '2' ? bestCross : (bestSame || bestCross);
   }
 
   if (!best) {
-    console.log(`✅ No better vault found. ${position.vaultName} is already the best on ${getChainName(position.chainId)}.`);
+    console.log(`✅ No better vault found. ${position.vaultName} is already optimal on ${getChainName(position.chainId)}.`);
     rl.close(); return;
   }
 
-  const improvement = best.apy - (current?.apy || 0);
-  // Only block if no specific target was given and improvement is negligible
+  const improvement  = best.apy - (current?.apy || 0);
+  const isCrossChain = best.vault.chainId !== position.chainId;
+
   if (!autoTo && improvement < 0.1) {
     console.log(`✅ ${position.vaultName} is already the best vault on ${getChainName(position.chainId)} (APY: ${current?.apy.toFixed(2)}%).`);
     rl.close(); return;
   }
 
   console.log(`\n📋 Rebalance Plan:`);
-  console.log(`  From : ${position.vaultName} (${position.protocol}) — APY: ${current?.apy.toFixed(2) || 'N/A'}%`);
-  console.log(`  To   : ${best.vault.name} (${best.vault.protocol}) — APY: ${best.apy.toFixed(2)}%`);
+  console.log(`  Mode : ${modeLabel}`);
+  console.log(`  From : ${position.vaultName} (${position.protocol}) — APY: ${current?.apy?.toFixed(2) || 'N/A'}% | ${getChainName(position.chainId)}`);
+  console.log(`  To   : ${best.vault.name} (${best.vault.protocol}) — APY: ${best.apy.toFixed(2)}% | ${getChainName(best.vault.chainId)}${isCrossChain ? ' ⚠️  Cross-chain' : ''}`);
   console.log(`  Gain : +${improvement.toFixed(2)}% APY`);
   console.log(`  Value: ~$${position.valueUsd.toFixed(2)}`);
 
@@ -217,30 +284,30 @@ async function main() {
   console.log(`\n🔄 Step 1: Withdrawing from ${position.vaultName}...`);
   await withdrawAll(position);
 
-  // Step 4: Wait for USDC
-  const usdcAvailable = await waitForUsdc(position.chainId, walletAddress, position.valueUsd * 0.95);
+  // Step 4: Wait for USDC on source chain
+  await waitForUsdc(position.chainId, walletAddress, position.valueUsd * 0.95);
 
-  // Step 5: Deposit into target vault (no fallback — rebalance intent is explicit)
+  // Step 5: Deposit into target vault
   console.log(`\n🚀 Step 2: Depositing into ${best.vault.name}...`);
   rl.close();
 
   const { depositToVault } = require('./composer');
-  const { recordPosition, getProviderWithFallback: getProvider } = require('./tools');
-  const { ethers: e } = require('ethers');
+  const { recordPosition } = require('./tools');
 
-  const ERC20_ABI_MIN = ['function balanceOf(address) view returns (uint256)', 'function decimals() view returns (uint8)'];
-  const toProvider   = await getProvider(best.vault.chainId);
-  const signer       = new e.Wallet(process.env.PRIVATE_KEY, toProvider);
-  const usdcAddr     = getUsdcAddress(best.vault.chainId);
-  const usdcContract = new e.Contract(usdcAddr, ERC20_ABI_MIN, toProvider);
-  const [usdcBal, usdcDec] = await Promise.all([usdcContract.balanceOf(walletAddress), usdcContract.decimals()]);
+  const ERC20_ABI_MIN = ['function balanceOf(address) view returns (uint256)'];
+  const fromProvider  = await getProviderWithFallback(position.chainId);
+  const usdcFromAddr  = getUsdcAddress(position.chainId);
+  const usdcContract  = new ethers.Contract(usdcFromAddr, ERC20_ABI_MIN, fromProvider);
+  const usdcBal       = await usdcContract.balanceOf(walletAddress);
+  // signerはfromChain用 — cross-chainでもbridge txはfromChainで送信
+  const signer        = new ethers.Wallet(process.env.PRIVATE_KEY, fromProvider);
 
   try {
     await depositToVault({
       signer,
-      fromChainId:       best.vault.chainId,
+      fromChainId:       position.chainId,
       toChainId:         best.vault.chainId,
-      fromTokenAddress:  usdcAddr,
+      fromTokenAddress:  usdcFromAddr,
       vaultTokenAddress: best.vault.address,
       amountWei:         usdcBal.toString(),
       depositPack:       best.vault.depositPacks?.[0]?.name || '',
@@ -249,8 +316,8 @@ async function main() {
     console.log(`\n🎉 Rebalance complete! Stay Vaulthoric.`);
     console.log(`\n🤖 Vaulthoric will monitor your position and notify you`);
     console.log(`   if better yield opportunities appear.`);
-  } catch (e) {
-    console.log(`\n❌ Deposit into ${best.vault.name} failed: ${e.message?.slice(0, 80)}`);
+  } catch (err) {
+    console.log(`\n❌ Deposit into ${best.vault.name} failed: ${err.message?.slice(0, 80)}`);
     console.log(`   Your USDC is now idle on ${getChainName(best.vault.chainId)}.`);
     console.log(`   Run: node ask.js "put my USDC into best vault on ${getChainName(best.vault.chainId)}"`);
   }
