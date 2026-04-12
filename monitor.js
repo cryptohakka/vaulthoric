@@ -53,7 +53,7 @@ async function generateSwitchReason(current, better) {
         max_tokens: 100,
         messages: [
           {
-            role: 'system',
+            role:    'system',
             content: 'You are a DeFi investment analyst. In 2 sentences, explain why switching vaults is recommended. Be concise and specific. No markdown.',
           },
           {
@@ -87,11 +87,14 @@ async function getPositionValue(position) {
     const contract = new ethers.Contract(position.address, BAL_ABI, provider);
     const bal      = await contract.balanceOf(WALLET);
     if (bal === 0n) return null;
+
+    // ERC-4626はconvertToAssetsで換算、aave-v3 aTokenなど非対応の場合は
+    // balanceOfをそのまま使う（aTokenはUSDCと1:1）
     try {
       const assets = await contract.convertToAssets(bal);
       return parseFloat(ethers.formatUnits(assets, 6));
     } catch {
-      return null;
+      return parseFloat(ethers.formatUnits(bal, 6));
     }
   } catch {
     return null;
@@ -132,15 +135,15 @@ async function main() {
 
     if (!current || !best) continue;
 
-    console.log(`     Current APY: ${current.apy.toFixed(2)}% | Best available: ${best.apy.toFixed(2)}%`);
+    console.log(`     Current APY: ${current.apy.toFixed(2)}% | Best available: ${best.apy.toFixed(2)}% (${best.vault.name})`);
 
-    const improvement = best.apy - current.apy;
-    const isSameChainVault = pos.chainId === best.vault.chainId;
-    const threshold        = isSameChainVault ? IMPROVEMENT_THRESHOLD_SAME : IMPROVEMENT_THRESHOLD_CROSS;
-    const isBetter         = improvement >= threshold && best.vault.address.toLowerCase() !== pos.address.toLowerCase();
+    const improvement    = best.apy - current.apy;
+    const isSameChain    = pos.chainId === best.vault.chainId;
+    const threshold      = isSameChain ? IMPROVEMENT_THRESHOLD_SAME : IMPROVEMENT_THRESHOLD_CROSS;
+    const isBetter       = improvement >= threshold && best.vault.address.toLowerCase() !== pos.address.toLowerCase();
 
     if (isBetter) {
-      console.log(`     🚀 Better vault found: ${best.vault.name} (+${improvement.toFixed(2)}%)`);
+      console.log(`     🚀 Better vault found: ${best.vault.name} (${best.vault.address.slice(0,6)}…${best.vault.address.slice(-4)}) +${improvement.toFixed(2)}%`);
       const reason = await generateSwitchReason(
         { name: pos.name, protocol: pos.protocol, apy: current.apy, stability: current.stability },
         best
@@ -165,6 +168,7 @@ async function main() {
   }
 
   for (const { pos, current, best, improvement, valueUsd, reason } of alerts) {
+    const isSameChain = pos.chainId === best.vault.chainId;
     const embed = {
       title:       '🔔 Vaulthoric — Better Yield Found',
       color:       0xf4a020,
@@ -176,7 +180,7 @@ async function main() {
         },
         {
           name:   '📈 Better Opportunity',
-          value:  `**${best.vault.name}** (${best.vault.protocol})\nAPY: ${best.apy.toFixed(2)}% | +${improvement.toFixed(2)}%\nChain: ${getChainName(best.vault.chainId)}`,
+          value:  `**${best.vault.name}** (${best.vault.protocol})\nAPY: ${best.apy.toFixed(2)}% | +${improvement.toFixed(2)}%\nChain: ${getChainName(best.vault.chainId)}\n\`${best.vault.address.slice(0,6)}…${best.vault.address.slice(-4)}\``,
           inline: true,
         },
         {
@@ -186,9 +190,9 @@ async function main() {
         },
         {
           name:   '⚡ Action',
-          value:  pos.chainId === best.vault.chainId
+          value:  isSameChain
             ? `\`node rebalance.js "${pos.name} to ${best.vault.address}"\``
-            : `\`node rebalance.js "${pos.name} to ${best.vault.address}"\`\n⚠️ Cross-chain bridge required (~${Math.ceil((best.vault.chainId !== pos.chainId ? 18 : 1))} min)`,
+            : `\`node rebalance.js "${pos.name} to ${best.vault.address}"\`\n⚠️ Cross-chain bridge required`,
           inline: false,
         },
       ],
@@ -198,8 +202,7 @@ async function main() {
     await notify(embed);
     console.log(`\n📨 Discord notification sent for ${pos.name}`);
 
-    // Auto-rebalance if enabled (same-chain only — cross-chain takes too long for cron)
-    const isSameChain = pos.chainId === best.vault.chainId;
+    // Auto-rebalance if enabled (same-chain only)
     if (AUTO_REBALANCE && isSameChain) {
       console.log(`\n🔄 AUTO_REBALANCE=true — executing same-chain rebalance...`);
       try {

@@ -1,32 +1,22 @@
 [
   {
-    "address": "0x5837e4189819637853a357af36650902347f5e73",
-    "chainId": 42161,
-    "protocol": "morpho-v1",
-    "name": "KPK-USDC-YIELDV2",
-    "symbol": "USDC",
-    "decimals": 18,
-    "depositPack": "morpho-zaps",
-    "addedAt": "2026-04-10T21:16:34.667Z"
-  },
-  {
-    "address": "0x1d3b1cd0a0f242d598834b3f2d126dc6bd774657",
+    "address": "0x4e65fe4dba92790696d040ac24aa414708f5c0ab",
     "chainId": 8453,
-    "protocol": "morpho-v1",
-    "name": "CSUSDC",
-    "symbol": "USDC",
-    "decimals": 18,
-    "depositPack": "morpho-zaps",
-    "addedAt": "2026-04-11T06:48:13.434Z"
-  },
-  {
-    "address": "0x38648958836ea88b368b4ac23b86ad44b0fe7508",
-    "chainId": 143,
-    "protocol": "neverland",
+    "protocol": "aave-v3",
     "name": "USDC",
     "symbol": "USDC",
+    "decimals": 6,
+    "depositPack": "aave-zaps",
+    "addedAt": "2026-04-11T14:12:31.940Z"
+  },
+  {
+    "address": "0xbeefa7b88064feef0cee02aaebbd95d30df3878f",
+    "chainId": 8453,
+    "protocol": "morpho-v1",
+    "name": "BBQUSDC",
+    "symbol": "USDC",
     "decimals": 18,
-    "depositPack": "neverland-zaps",
-    "addedAt": "2026-04-11T06:55:32.076Z"
+    "depositPack": "morpho-zaps",
+    "addedAt": "2026-04-12T06:05:58.817Z"
   }
 ]
