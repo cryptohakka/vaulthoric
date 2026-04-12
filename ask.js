@@ -5,6 +5,7 @@ require('dotenv').config();
 
 const axios    = require('axios');
 const readline = require('readline');
+const AUTO_MODE = process.argv.includes('--auto');
 const { ethers } = require('ethers');
 const { getVaults }    = require('./earn');
 const { rankVaults }   = require('./scorer');
@@ -26,6 +27,10 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL   = process.env.OPENROUTER_MODEL || 'google/gemini-flash-1.5';
 
 function prompt(rl, question) {
+  if (AUTO_MODE) {
+    console.log(question + 'y (auto)');
+    return Promise.resolve('y');
+  }
   return new Promise(resolve => rl.question(question, resolve));
 }
 
@@ -639,7 +644,9 @@ Examples:
 }
 
 if (require.main === module) {
-  main().catch(console.error).finally(() => process.exit(0));
+  main()
+    .then(() => process.exit(0))
+    .catch(e => { console.error(e); process.exit(1); });
 }
 
 module.exports = { run, parseInstruction };

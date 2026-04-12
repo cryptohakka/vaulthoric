@@ -29,6 +29,10 @@ const WALLET             = new ethers.Wallet(process.env.PRIVATE_KEY).address;
 const IMPROVEMENT_THRESHOLD_SAME  = 0.5; // Same-chain: 0.5% APY improvement
 const IMPROVEMENT_THRESHOLD_CROSS = 2.0; // Cross-chain: 2.0% APY improvement (bridge cost + risk)
 
+// Estimated transaction costs (USD) and efficiency threshold
+const ESTIMATED_COST_USD = { sameChain: 0.01, crossChain: 0.02 };
+const COST_RATIO_THRESHOLD = 0.10; // flag as inefficient if cost > 10% of position value
+
 const BAL_ABI = [
   'function balanceOf(address) view returns (uint256)',
   'function convertToAssets(uint256 shares) view returns (uint256 assets)',
@@ -43,24 +47,26 @@ async function notify(embed) {
 
 // ─── AI Summary ───────────────────────────────────────────────────────────────
 
-async function generateSwitchReason(current, better) {
+async function generateSwitchReason(current, better, costUsd, costRatio, isEfficient) {
   if (!OPENROUTER_API_KEY) return null;
   try {
     const res = await axios.post(
       'https://openrouter.ai/api/v1/chat/completions',
       {
         model:      OPENROUTER_MODEL,
-        max_tokens: 100,
+        max_tokens: 120,
         messages: [
           {
             role:    'system',
-            content: 'You are a DeFi investment analyst. In 2 sentences, explain why switching vaults is recommended. Be concise and specific. No markdown.',
+            content: 'You are a DeFi investment analyst. In 2 sentences, explain the yield opportunity and whether the switch is recommended given transaction costs. Be concise and specific. No markdown.',
           },
           {
             role: 'user',
             content: `Current: ${current.name} (${current.protocol}) — APY ${current.apy.toFixed(2)}%, stability ${current.stability.toFixed(3)}
 Better:  ${better.vault.name} (${better.vault.protocol}) — APY ${better.apy.toFixed(2)}%, stability ${better.stability.toFixed(3)}
-Improvement: +${(better.apy - current.apy).toFixed(2)}% APY`,
+Improvement: +${(better.apy - current.apy).toFixed(2)}% APY
+Estimated cost: $${costUsd.toFixed(2)} (${(costRatio * 100).toFixed(1)}% of position)
+Cost efficient: ${isEfficient ? 'Yes' : 'No — position may be too small for this switch'}`,
           },
         ],
       },
@@ -144,11 +150,15 @@ async function main() {
 
     if (isBetter) {
       console.log(`     🚀 Better vault found: ${best.vault.name} (${best.vault.address.slice(0,6)}…${best.vault.address.slice(-4)}) +${improvement.toFixed(2)}%`);
+      const costUsd    = isSameChain ? ESTIMATED_COST_USD.sameChain : ESTIMATED_COST_USD.crossChain;
+      const costRatio  = costUsd / valueUsd;
+      const isEfficient = costRatio <= COST_RATIO_THRESHOLD;
+      console.log(`     💸 Est. cost: $${costUsd.toFixed(2)} (${(costRatio * 100).toFixed(1)}% of position) ${isEfficient ? '✅' : '❌'}`);
       const reason = await generateSwitchReason(
         { name: pos.name, protocol: pos.protocol, apy: current.apy, stability: current.stability },
-        best
+        best, costUsd, costRatio, isEfficient
       );
-      alerts.push({ pos, current, best, improvement, valueUsd, reason });
+      alerts.push({ pos, current, best, improvement, valueUsd, reason, isSameChain, costUsd, costRatio, isEfficient });
     } else {
       console.log(`     ✅ Current vault is optimal`);
     }
@@ -167,11 +177,15 @@ async function main() {
     return;
   }
 
-  for (const { pos, current, best, improvement, valueUsd, reason } of alerts) {
-    const isSameChain = pos.chainId === best.vault.chainId;
+  for (const { pos, current, best, improvement, valueUsd, reason, isSameChain, costUsd, costRatio, isEfficient } of alerts) {
+    const costField  = `Est. cost: $${costUsd.toFixed(2)} (${(costRatio * 100).toFixed(1)}% of position) ${isEfficient ? '✅ Efficient' : '❌ Not recommended'}`;
+    const recommendation = isEfficient
+      ? `✅ Switching is beneficial — yield gain offsets transaction cost.`
+      : `⚠️ Not recommended at current position size. Consider rebalancing when position exceeds ~$${(costUsd / COST_RATIO_THRESHOLD).toFixed(0)}.`;
+
     const embed = {
-      title:       '🔔 Vaulthoric — Better Yield Found',
-      color:       0xf4a020,
+      title: '🔔 Vaulthoric — Better Yield Found',
+      color: isEfficient ? 0xf4a020 : 0x9e9e9e,
       fields: [
         {
           name:   '📉 Current Position',
@@ -184,19 +198,29 @@ async function main() {
           inline: true,
         },
         {
+          name:   '💸 Cost Efficiency',
+          value:  costField,
+          inline: false,
+        },
+        {
           name:   '🤖 AI Analysis',
           value:  reason || 'Higher risk-adjusted yield available with similar stability profile.',
           inline: false,
         },
         {
-          name:   '⚡ Action',
+          name:   '⚠️ Recommendation',
+          value:  recommendation,
+          inline: false,
+        },
+        {
+          name:   '⚡ Suggested Action',
           value:  isSameChain
-            ? `\`node rebalance.js "${pos.name} to ${best.vault.address}"\`\n💡 Based on this position's value (~$${valueUsd.toFixed(2)})`
-            : `\`node rebalance.js "${pos.name} to ${best.vault.address}"\`\n⚠️ Cross-chain bridge required\n💡 Based on this position's value (~$${valueUsd.toFixed(2)})`,
+            ? `\`node rebalance.js "${pos.name} to ${best.vault.address}"\``
+            : `\`node rebalance.js "${pos.name} to ${best.vault.address}"\`\n⚠️ Cross-chain bridge required`,
           inline: false,
         },
       ],
-      footer: { text: `Vaulthoric Monitor • ${new Date().toUTCString()}` },
+      footer: { text: `Vaulthoric Monitor • ${new Date().toUTCString()} — Monitoring active` },
     };
 
     await notify(embed);

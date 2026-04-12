@@ -297,6 +297,10 @@ async function withdrawAll(position) {
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 async function main() {
+  const args   = process.argv.slice(2);
+  const auto   = args.includes('--auto');
+  const posArg = args.find(a => !a.startsWith('--'));
+
   const walletAddress = new ethers.Wallet(process.env.PRIVATE_KEY).address;
   console.log(`\n🏦 Vaulthoric — Position Manager`);
   console.log(`👛 Wallet: ${walletAddress}`);
@@ -306,6 +310,15 @@ async function main() {
 
   console.log(`\n📊 Your Vault Positions:`);
   printPositionsTable(positions);
+
+  if (auto && posArg) {
+    const idx = positions.findIndex(p => p.vaultName?.toLowerCase().includes(posArg.toLowerCase()));
+    if (idx === -1) { console.log(`❌ Position "${posArg}" not found.`); return; }
+    console.log(`\n⚡ Auto-withdrawing: ${positions[idx].vaultName}`);
+    await withdrawAll(positions[idx]);
+    console.log('\n🎉 Withdrawal complete! Stay Vaulthoric.');
+    return;
+  }
 
   const rl     = readline.createInterface({ input: process.stdin, output: process.stdout });
   const choice = await new Promise(resolve => rl.question('\nSelect position to withdraw (number) or q to quit: ', resolve));
@@ -318,7 +331,9 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch(console.error).finally(() => process.exit(0));
+  main()
+    .then(() => process.exit(0))
+    .catch(e => { console.error(e); process.exit(1); });
 }
 
 module.exports = { scanPositions, withdrawAll };

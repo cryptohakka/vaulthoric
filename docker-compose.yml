@@ -1,0 +1,13 @@
+# docker-compose.yml
+services:
+  vaulthoric:
+    build: .
+    container_name: vaulthoric
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    volumes:
+      - ./positions.json:/app/positions.json
+      - ./monitor.log:/app/monitor.log

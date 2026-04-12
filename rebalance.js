@@ -5,6 +5,7 @@
 require('dotenv').config();
 
 const readline = require('readline');
+const AUTO_MODE = process.argv.includes('--auto');
 const { ethers } = require('ethers');
 const { getVaults }  = require('./earn');
 const { rankVaults } = require('./scorer');
@@ -19,6 +20,13 @@ const { scanPositions, withdrawAll } = require('./withdraw');
 suppressRpcNoise();
 
 function prompt(rl, q) {
+  if (AUTO_MODE) {
+    // position selection prompts need '1', confirmation prompts need 'y'
+    const isSelection = /number|select.*position|select.*target/i.test(q);
+    const ans = isSelection ? '1' : 'y';
+    console.log(q + ans + ' (auto)');
+    return Promise.resolve(ans);
+  }
   return new Promise(r => rl.question(q, r));
 }
 
@@ -41,16 +49,24 @@ async function parseRebalanceInstruction(instruction) {
           content: `Extract rebalance parameters from the instruction. Return JSON only, no explanation:
 {"from": "VAULT_NAME", "to": "VAULT_NAME_or_mode"}
 
+Rules for "from" field:
+- Use the source vault name if explicitly mentioned (e.g. "BBQUSDC to safest")
+- If no specific source vault is mentioned, use null
+
 Rules for "to" field:
 - If destination is a specific vault name or address, use it as-is
 - If destination means best risk-adjusted / optimal / balanced → use "best"
 - If destination means safest / lowest risk / most stable → use "safest"
 - If destination means highest yield / highest APY / most aggressive → use "highest"
+- If only a mode word appears with no source vault, "from" is null
 
 Examples:
 "CSUSDC to STEAKUSDC" -> {"from":"CSUSDC","to":"STEAKUSDC"}
 "BBQUSDC to best" -> {"from":"BBQUSDC","to":"best"}
 "BBQUSDC to safest" -> {"from":"BBQUSDC","to":"safest"}
+"safest" -> {"from":null,"to":"safest"}
+"highest" -> {"from":null,"to":"highest"}
+"best" -> {"from":null,"to":"best"}
 "USDC to highest yield" -> {"from":"USDC","to":"highest"}
 "BBQUSDC to 0x1234..." -> {"from":"BBQUSDC","to":"0x1234..."}`,
         },
@@ -90,9 +106,14 @@ async function findBetterVault(position, valueUsd, mode = 'best', scope = 'same'
   }
 
   if (scope === 'all') {
-    const ranked  = sortByMode(rankVaults(allVaults, valueUsd, position.chainId));
-    const current = ranked.find(v => v.vault.address.toLowerCase() === position.vaultAddress.toLowerCase());
-    return { current, bestSame: null, bestCross: null, ranked };
+    const sameChain  = allVaults.filter(v => v.chainId === position.chainId);
+    const crossChain = allVaults.filter(v => v.chainId !== position.chainId);
+    const rankedSame  = sortByMode(rankVaults(sameChain,  valueUsd, position.chainId));
+    const rankedCross = sortByMode(rankVaults(crossChain, valueUsd, position.chainId));
+    const current   = rankedSame.find(v => v.vault.address.toLowerCase() === position.vaultAddress.toLowerCase());
+    const bestSame  = excludeCurrent(rankedSame)[0]  || null;
+    const bestCross = rankedCross[0] || null;
+    return { current, bestSame, bestCross, ranked: rankedSame };
   }
 
   if (scope === 'both') {
@@ -143,19 +164,23 @@ async function main() {
   const walletAddress = new ethers.Wallet(process.env.PRIVATE_KEY).address;
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-  const instruction = process.argv[2] || null;
-  const isAuto      = process.argv.includes('--auto');
+  const isAuto         = process.argv.includes('--auto');
+  const rawInstruction = process.argv[2] || null;
+  // Extract scope: before passing to LLM
+  const scopeMatch = rawInstruction?.match(/\bscope:(same|all|both)\b/i);
+  const autoScope  = scopeMatch ? scopeMatch[1].toLowerCase() : null;
+  const instruction = rawInstruction?.replace(/\bscope:\S+\s*/gi, '').replace(/\bmode\b\s*/gi, '').trim() || null;
   let autoFrom = null;
   let autoTo   = null;
 
   if (instruction) {
-    console.log(`\n📝 Instruction: "${instruction}"`);
+    console.log(`\n📝 Instruction: "${rawInstruction}"`);
     console.log('🧠 Parsing...');
     try {
       const parsed = await parseRebalanceInstruction(instruction);
       autoFrom = parsed?.from || null;
       autoTo   = parsed?.to   || null;
-      console.log(`  From: ${autoFrom || 'auto'} | To: ${autoTo || 'best'}`);
+      console.log(`  From: ${autoFrom || 'auto'} | To: ${autoTo || 'best'}${autoScope ? ' | Scope: '+autoScope : ''}`);
     } catch {
       console.log('  ⚠️  Could not parse instruction, switching to interactive mode');
     }
@@ -211,8 +236,8 @@ async function main() {
   // Determine mode and scope
   const isSpecificTarget = autoTo && !MODES.includes(autoTo);
   const isModeTarget     = autoTo && MODES.includes(autoTo);
-  const mode  = (!isAuto && isModeTarget) ? autoTo : 'best';
-  const scope = isAuto ? 'same' : isSpecificTarget ? 'all' : isModeTarget ? 'both' : 'same';
+  const mode  = isModeTarget ? autoTo : 'best';
+  const scope = autoScope || (isAuto ? 'same' : isSpecificTarget ? 'all' : isModeTarget ? 'both' : 'same');
 
   // Step 2: Find better vault
   const modeLabel = mode === 'safest' ? '🛡️  Safest' : mode === 'highest' ? '🚀 Highest yield' : '⚖️  Best risk-adjusted';
@@ -236,19 +261,25 @@ async function main() {
       console.log(`  ⚠️  "${autoTo}" not found, using best available`);
     }
 
-  } else if (isModeTarget && !isAuto && bestCross) {
-    // mode指定 — same-chainとcross-chainの候補を提示
-    console.log(`\n${modeLabel} candidates:`);
-    if (bestSame) {
-      console.log(`  1. [Same-chain ] ${bestSame.vault.name.padEnd(14)} (${bestSame.vault.protocol}) | APY: ${bestSame.apy.toFixed(2)}% | ${getChainName(bestSame.vault.chainId)}`);
+  } else if (bestCross && (autoScope === 'all' || (isModeTarget && !isAuto))) {
+    // scope:all or mode指定 — same/cross候補を比較
+    if (isAuto) {
+      // auto: APYが高い方を自動選択
+      const sameBetter = bestSame && bestSame.apy > bestCross.apy;
+      best = sameBetter ? bestSame : bestCross;
+      console.log(`  Auto-selected: ${best.vault.name} on ${getChainName(best.vault.chainId)} (APY: ${best.apy.toFixed(2)}%)`);
     } else {
-      console.log(`  1. [Same-chain ] No better vault on same chain`);
+      console.log(`\n${modeLabel} candidates:`);
+      if (bestSame) {
+        console.log(`  1. [Same-chain ] ${bestSame.vault.name.padEnd(14)} (${bestSame.vault.protocol}) | APY: ${bestSame.apy.toFixed(2)}% | ${getChainName(bestSame.vault.chainId)}`);
+      } else {
+        console.log(`  1. [Same-chain ] No better vault on same chain`);
+      }
+      console.log(`  2. [Cross-chain] ${bestCross.vault.name.padEnd(14)} (${bestCross.vault.protocol}) | APY: ${bestCross.apy.toFixed(2)}% | ${getChainName(bestCross.vault.chainId)}`);
+      const pick = await prompt(rl, '\nSelect target (1/2) or q to quit: ');
+      if (pick.toLowerCase() === 'q') { rl.close(); return; }
+      best = pick === '2' ? bestCross : (bestSame || bestCross);
     }
-    console.log(`  2. [Cross-chain] ${bestCross.vault.name.padEnd(14)} (${bestCross.vault.protocol}) | APY: ${bestCross.apy.toFixed(2)}% | ${getChainName(bestCross.vault.chainId)}`);
-
-    const pick = await prompt(rl, '\nSelect target (1/2) or q to quit: ');
-    if (pick.toLowerCase() === 'q') { rl.close(); return; }
-    best = pick === '2' ? bestCross : (bestSame || bestCross);
   }
 
   if (!best) {

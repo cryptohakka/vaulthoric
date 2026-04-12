@@ -5,6 +5,7 @@
 require('dotenv').config();
 
 const readline = require('readline');
+const AUTO_MODE = process.argv.includes('--auto');
 const axios    = require('axios');
 const { ethers } = require('ethers');
 const { getVaults }  = require('./earn');
@@ -30,6 +31,13 @@ const POLL_MAX = 120; // 10 min max per bridge
 const POLL_MS  = 5000;
 
 function prompt(rl, q) {
+  if (AUTO_MODE) {
+    const isChain  = /target chain|number or 0/i.test(q);
+    const isMode   = /select.*1\/2\/3/i.test(q);
+    const ans = isChain ? '0' : isMode ? '1' : 'y';
+    console.log(q + ans + ' (auto)');
+    return Promise.resolve(ans);
+  }
   return new Promise(r => rl.question(q, r));
 }
 
@@ -86,10 +94,10 @@ async function scanAllBalances(wallet) {
 
 // ─── Best Vault Suggestion ────────────────────────────────────────────────────
 
-async function suggestTargetChain() {
+async function suggestTargetChain(amountUsd = 1000) {
   try {
     const vaults = await getVaults({ asset: 'USDC', minTvlUsd: 500000 });
-    const ranked = rankVaults(vaults);
+    const ranked = rankVaults(vaults, amountUsd);
     const best   = ranked[0];
     return { chainId: best.vault.chainId, name: getChainName(best.vault.chainId), vault: best };
   } catch {
@@ -281,7 +289,8 @@ async function depositBestVault({ chainId, amountWei, wallet, mode = 'best' }) {
   const onChain = vaults.filter(v => v.chainId === chainId);
   if (onChain.length === 0) { console.log(`  ⚠️  No vaults on chain ${chainId}`); return null; }
 
-  const ranked = rankVaults(onChain).filter(v => v.vault.depositPacks?.length > 0);
+  const depositUsd = parseFloat(ethers.formatUnits(amountWei, 6));
+  const ranked = rankVaults(onChain, depositUsd).filter(v => v.vault.depositPacks?.length > 0);
   const candidates = mode === 'safest'
     ? [...ranked].sort((a, b) => (b.stability * b.trust) - (a.stability * a.trust))
     : mode === 'highest'
@@ -392,7 +401,7 @@ async function main() {
 
   // Suggest best target chain
   console.log('🤖 Finding best vault across all chains...');
-  const suggested = await suggestTargetChain();
+  const suggested = await suggestTargetChain(totalUsd);
   console.log(`\n💡 Suggested target: ${suggested.name}`);
   if (suggested.vault) {
     console.log(`   Best vault: ${suggested.vault.vault.name} | APY ${suggested.vault.apy.toFixed(2)}% | score=${suggested.vault.score.toFixed(2)}`);
@@ -466,7 +475,9 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch(e => { console.error('❌', e.message); process.exit(1); });
+  main()
+    .then(() => process.exit(0))
+    .catch(e => { console.error('❌', e.message); process.exit(1); });
 }
 
 module.exports = { bridgeAllParallel, getUsdcBalance, depositBestVault, getBridgeQuote };
