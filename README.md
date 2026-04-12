@@ -197,12 +197,12 @@ monitor.js (cron)
 
 ### Deposit Strategy (composer.js)
 
-Composer uses a tiered fallback strategy:
+Composer selects a deposit path based on the vault's protocol pack:
 
-1. **Direct ERC-4626 deposit** — attempted first for same-chain deposits; skipped if gas estimate fails
-2. **LI.FI Composer quote** — handles routing, bridging, and deposit in one tx
-3. **Aave Pool / Neverland direct** — for `aave-zaps` and `neverland-zaps` protocol packs
-4. **Cross-chain fallback** — bridge first via LI.FI, then direct deposit on destination chain
+1. **Aave Pool direct** — `aave-zaps` / `neverland-zaps` (LI.FI Composer does not support these protocols)
+2. **Direct ERC-4626 deposit** — `morpho-zaps` and other known packs
+3. **LI.FI Composer quote** — unknown packs; handles routing, bridging, and deposit in one tx
+4. **Cross-chain fallback** — if Composer fails, bridge via LI.FI then direct deposit on destination chain
 
 Gas cost is compared against deposit value before execution. Deposits are skipped with a warning if the cost ratio exceeds a safe threshold.
 
@@ -223,18 +223,12 @@ All modes skip vaults that fail `estimateGas` and automatically fall back to the
 ```env
 PRIVATE_KEY=0x...
 OPENROUTER_API_KEY=sk-or-...
-OPENROUTER_MODEL=google/gemini-flash-1.5   # optional
+OPENROUTER_MODEL=google/gemini-2.5-flash-lite   # optional
 LIFI_API_KEY=                              # optional, increases rate limits
 
 # Monitor
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 AUTO_REBALANCE=false   # set to true to auto-execute same-chain rebalances
-
-# Optional RPC overrides
-RPC_BASE=https://mainnet.base.org
-RPC_ARB=https://arb1.arbitrum.io/rpc
-RPC_MONAD=https://rpc.monad.xyz
-# ... etc
 ```
 
 ---
