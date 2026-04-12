@@ -170,14 +170,19 @@ async function main() {
   const { current, best: bestAuto, ranked } = await findBetterVault(position, position.valueUsd);
 
   // If specific target vault specified, find it in ranked list
+  // Supports both vault address (0x...) and vault name
   let best = bestAuto;
   if (autoTo && autoTo !== 'best') {
-    const specified = ranked.find(v => v.vault.name.toLowerCase().includes(autoTo.toLowerCase()));
+    const isAddress = autoTo.startsWith('0x') && autoTo.length >= 10;
+    const specified = isAddress
+      ? ranked.find(v => v.vault.address.toLowerCase() === autoTo.toLowerCase())
+      : ranked.find(v => v.vault.name.toLowerCase().includes(autoTo.toLowerCase()));
+
     if (specified) {
       best = specified;
-      console.log(`  Using specified vault: ${best.vault.name}`);
+      console.log(`  Using specified vault: ${best.vault.name} (${best.vault.address.slice(0,6)}…${best.vault.address.slice(-4)})`);
     } else {
-      console.log(`  ⚠️  "${autoTo}" not found, using best available`);
+      console.log(`  ⚠️  "${autoTo}" not found in ranked vaults, using best available`);
     }
   }
 

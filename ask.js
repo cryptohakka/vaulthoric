@@ -510,13 +510,16 @@ async function run(instruction, walletAddress) {
       const signer   = new ethers.Wallet(pk, provider);
 
       // Try selected vault first, then confirm + fall back on failure.
-      const candidates = [selectedVault, ...filtered.slice(1, 4)].filter(Boolean);
+      // Restrict fallback to same destination chain — no re-bridging on failure.
+      const candidates = [selectedVault, ...filtered.slice(1, 4)]
+        .filter(Boolean)
+        .filter(v => v.vault.chainId === toChainId);
 
       for (const candidate of candidates) {
         const isFirst = candidate === selectedVault;
 
         if (!isFirst) {
-          printCandidateProposal(candidate, depositAmount, fromChainId, asset);
+          await printCandidateProposal(candidate, depositAmount, fromChainId, asset);
           const ans = await prompt(rl, '\n✅ Proceed with this vault? (y/n/q): ');
           if (ans.toLowerCase() === 'q') { console.log('\n❌ Cancelled.'); rl.close(); return; }
           if (ans.toLowerCase() !== 'y') { console.log('  Skipping...'); continue; }
@@ -534,8 +537,8 @@ async function run(instruction, walletAddress) {
           });
           recordPosition(candidate.vault, toChainId);
           console.log('\n🎉 Consolidate + deposit complete!');
-      console.log('\n🤖 Vaulthoric will monitor your position and notify you');
-      console.log('   if better yield opportunities appear. Stay Vaulthoric.');
+          console.log('\n🤖 Vaulthoric will monitor your position and notify you');
+          console.log('   if better yield opportunities appear. Stay Vaulthoric.');
           rl.close();
           return result;
         } catch (e) {
@@ -545,7 +548,9 @@ async function run(instruction, walletAddress) {
           }
         }
       }
-      console.log('\n❌ All vault candidates failed.');
+      console.log(`\n❌ All vault candidates on ${getChainName(toChainId)} failed.`);
+      console.log(`   Your USDC is now idle on ${getChainName(toChainId)}.`);
+      console.log(`   Run: node ask.js "put my USDC into best vault on ${getChainName(toChainId)}"`);
       rl.close();
       return;
     }
@@ -555,13 +560,17 @@ async function run(instruction, walletAddress) {
     const amountWei = ethers.parseUnits(depositAmount.toFixed(6), balanceInfo.decimals);
 
     // Try selected vault first, then confirm + fall back on failure.
-    const candidates = [selectedVault, ...filtered.slice(1, 4)].filter(Boolean);
+    // Fallback is restricted to the same destination chain to avoid re-bridging.
+    const targetChainId = selectedVault.vault.chainId;
+    const candidates = [selectedVault, ...filtered.slice(1, 4)]
+      .filter(Boolean)
+      .filter(v => v.vault.chainId === targetChainId); // same chain only
 
     for (const candidate of candidates) {
       const isFirst = candidate === selectedVault;
 
       if (!isFirst) {
-        printCandidateProposal(candidate, depositAmount, fromChainId, asset);
+        await printCandidateProposal(candidate, depositAmount, fromChainId, asset);
         const ans = await prompt(rl, '\n✅ Proceed with this vault? (y/n/q): ');
         if (ans.toLowerCase() === 'q') { console.log('\n❌ Cancelled.'); rl.close(); return; }
         if (ans.toLowerCase() !== 'y') { console.log('  Skipping...'); continue; }
@@ -579,8 +588,8 @@ async function run(instruction, walletAddress) {
         });
         recordPosition(candidate.vault, candidate.vault.chainId);
         console.log('\n🎉 Deposit complete!');
-      console.log('\n🤖 Vaulthoric will monitor your position and notify you');
-      console.log('   if better yield opportunities appear. Stay Vaulthoric.');
+        console.log('\n🤖 Vaulthoric will monitor your position and notify you');
+        console.log('   if better yield opportunities appear. Stay Vaulthoric.');
         rl.close();
         return result;
       } catch (e) {
@@ -591,7 +600,11 @@ async function run(instruction, walletAddress) {
       }
     }
 
-    console.log('\n❌ All vault candidates failed.');
+    console.log(`\n❌ All vault candidates on ${getChainName(targetChainId)} failed.`);
+    if (fromChainId !== targetChainId) {
+      console.log(`   Your USDC is now idle on ${getChainName(targetChainId)}.`);
+      console.log(`   Run: node ask.js "put my USDC into best vault on ${getChainName(targetChainId)}"`);
+    }
     rl.close();
 
   } catch (e) {

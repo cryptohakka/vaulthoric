@@ -26,7 +26,8 @@ const OPENROUTER_MODEL   = process.env.OPENROUTER_MODEL || 'google/gemini-flash-
 const WALLET             = new ethers.Wallet(process.env.PRIVATE_KEY).address;
 
 // Minimum APY improvement (absolute %) to trigger a notification
-const IMPROVEMENT_THRESHOLD = 0.5;
+const IMPROVEMENT_THRESHOLD_SAME  = 0.5; // Same-chain: 0.5% APY improvement
+const IMPROVEMENT_THRESHOLD_CROSS = 2.0; // Cross-chain: 2.0% APY improvement (bridge cost + risk)
 
 const BAL_ABI = [
   'function balanceOf(address) view returns (uint256)',
@@ -134,7 +135,9 @@ async function main() {
     console.log(`     Current APY: ${current.apy.toFixed(2)}% | Best available: ${best.apy.toFixed(2)}%`);
 
     const improvement = best.apy - current.apy;
-    const isBetter    = improvement >= IMPROVEMENT_THRESHOLD && best.vault.address.toLowerCase() !== pos.address.toLowerCase();
+    const isSameChainVault = pos.chainId === best.vault.chainId;
+    const threshold        = isSameChainVault ? IMPROVEMENT_THRESHOLD_SAME : IMPROVEMENT_THRESHOLD_CROSS;
+    const isBetter         = improvement >= threshold && best.vault.address.toLowerCase() !== pos.address.toLowerCase();
 
     if (isBetter) {
       console.log(`     🚀 Better vault found: ${best.vault.name} (+${improvement.toFixed(2)}%)`);
@@ -183,7 +186,9 @@ async function main() {
         },
         {
           name:   '⚡ Action',
-          value:  `\`node rebalance.js "${pos.name} to ${best.vault.name}"\``,
+          value:  pos.chainId === best.vault.chainId
+            ? `\`node rebalance.js "${pos.name} to ${best.vault.address}"\``
+            : `\`node rebalance.js "${pos.name} to ${best.vault.address}"\`\n⚠️ Cross-chain bridge required (~${Math.ceil((best.vault.chainId !== pos.chainId ? 18 : 1))} min)`,
           inline: false,
         },
       ],
@@ -193,19 +198,19 @@ async function main() {
     await notify(embed);
     console.log(`\n📨 Discord notification sent for ${pos.name}`);
 
-    // Auto-rebalance if enabled
-    if (AUTO_REBALANCE) {
-      console.log(`\n🔄 AUTO_REBALANCE=true — executing rebalance...`);
+    // Auto-rebalance if enabled (same-chain only — cross-chain takes too long for cron)
+    const isSameChain = pos.chainId === best.vault.chainId;
+    if (AUTO_REBALANCE && isSameChain) {
+      console.log(`\n🔄 AUTO_REBALANCE=true — executing same-chain rebalance...`);
       try {
         execSync(
-          `node ${__dirname}/rebalance.js "${pos.name} to ${best.vault.name}" --auto`,
+          `node ${__dirname}/rebalance.js "${pos.name} to ${best.vault.address}" --auto`,
           { stdio: 'inherit', cwd: __dirname }
         );
         await notify({
           title:       '✅ Vaulthoric — Auto-Rebalance Complete',
           color:       0x00c853,
-          description: `Successfully moved **${pos.name}** → **${best.vault.name}**
-New APY: ${best.apy.toFixed(2)}%`,
+          description: `Successfully moved **${pos.name}** → **${best.vault.name}** (\`${best.vault.address.slice(0,6)}…${best.vault.address.slice(-4)}\`)\nNew APY: ${best.apy.toFixed(2)}%`,
           footer:      { text: `Vaulthoric Monitor • ${new Date().toUTCString()}` },
         });
       } catch (e) {
@@ -213,7 +218,7 @@ New APY: ${best.apy.toFixed(2)}%`,
         await notify({
           title:       '❌ Vaulthoric — Auto-Rebalance Failed',
           color:       0xff1744,
-          description: `Could not rebalance **${pos.name}**. Please run manually:\n\`node rebalance.js "${pos.name} to ${best.vault.name}"\``,
+          description: `Could not rebalance **${pos.name}**. Please run manually:\n\`node rebalance.js "${pos.name} to ${best.vault.address}"\``,
           footer:      { text: `Vaulthoric Monitor • ${new Date().toUTCString()}` },
         });
       }
