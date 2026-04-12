@@ -191,8 +191,8 @@ async function main() {
         {
           name:   '⚡ Action',
           value:  isSameChain
-            ? `\`node rebalance.js "${pos.name} to ${best.vault.address}"\``
-            : `\`node rebalance.js "${pos.name} to ${best.vault.address}"\`\n⚠️ Cross-chain bridge required`,
+            ? `\`node rebalance.js "${pos.name} to ${best.vault.address}"\`\n💡 Based on this position's value (~$${valueUsd.toFixed(2)})`
+            : `\`node rebalance.js "${pos.name} to ${best.vault.address}"\`\n⚠️ Cross-chain bridge required\n💡 Based on this position's value (~$${valueUsd.toFixed(2)})`,
           inline: false,
         },
       ],
