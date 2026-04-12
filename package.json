@@ -4,23 +4,28 @@
   "description": "Risk-adjusted DeFi yield optimizer with natural language interface",
   "main": "agent.js",
   "scripts": {
-    "scan":        "dotenvx run --quiet -- node agent.js scan",
-    "suggest":     "dotenvx run --quiet -- node agent.js suggest",
-    "allocate":    "dotenvx run --quiet -- node agent.js allocate",
-    "ask":         "dotenvx run --quiet -- node ask.js",
-    "withdraw":    "dotenvx run --quiet -- node withdraw.js",
-    "consolidate": "dotenvx run --quiet -- node consolidate.js",
-    "rebalance":   "dotenvx run --quiet -- node rebalance.js",
-    "monitor":     "dotenvx run --quiet -- node monitor.js"
+    "scan": "node agent.js scan",
+    "suggest": "node agent.js suggest",
+    "allocate": "node agent.js allocate",
+    "ask": "node ask.js",
+    "withdraw": "node withdraw.js",
+    "consolidate": "node consolidate.js",
+    "rebalance": "node rebalance.js",
+    "monitor": "node monitor.js"
   },
-  "keywords": ["defi", "yield", "lifi", "usdc", "vault"],
+  "keywords": [
+    "defi",
+    "yield",
+    "lifi",
+    "usdc",
+    "vault"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@dotenvx/dotenvx": "^1.39.0",
     "axios": "^1.15.0",
-    "dotenv": "^17.4.1",
+    "dotenv": "^16.6.1",
     "ethers": "^6.16.0"
   }
 }
