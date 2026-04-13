@@ -209,11 +209,17 @@ async function _depositCrossChain2Step({ signer, fromChainId, toChainId, fromTok
   const toProvider = await getProviderWithFallback(toChainId);
   const toSigner   = new ethers.Wallet(process.env.PRIVATE_KEY, toProvider);
 
+  // Use actual arrived balance instead of bridge estimate
+  const usdcErc20     = new ethers.Contract(toUsdcAddress, ERC20_ABI, toProvider);
+  const actualBalance = await usdcErc20.balanceOf(fromAddress);
+  console.log(`  Actual USDC on chain ${toChainId}: ${ethers.formatUnits(actualBalance, 6)}`);
+  if (actualBalance === 0n) throw new Error('No USDC arrived on destination chain');
+
   if (pack === 'aave-zaps' && AAVE_POOLS[toChainId]) {
-    return await _depositAave(toSigner, toUsdcAddress, toChainId, bridgedAmount);
+    return await _depositAave(toSigner, toUsdcAddress, toChainId, actualBalance);
   }
   if (pack === 'morpho-zaps') {
-    return await _depositERC4626(toSigner, toUsdcAddress, vaultTokenAddress, bridgedAmount);
+    return await _depositERC4626(toSigner, toUsdcAddress, vaultTokenAddress, actualBalance);
   }
   throw new Error(`No direct deposit support for pack="${pack}" on cross-chain fallback`);
 }

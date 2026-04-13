@@ -1,12 +1,1 @@
-[
-  {
-    "address": "0xa8665084d8cd6276c00ca97cbc0bf4bc9ae94c79",
-    "chainId": 143,
-    "protocol": "morpho-v1",
-    "name": "HYPERUSDCA",
-    "symbol": "USDC",
-    "decimals": 18,
-    "depositPack": "morpho-zaps",
-    "addedAt": "2026-04-13T08:03:55.017Z"
-  }
-]
+[]

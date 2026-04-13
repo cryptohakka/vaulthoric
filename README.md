@@ -287,6 +287,8 @@ GAS_FALLBACK_THRESHOLD_USD=0.05
 - [ ] **Auto-compound** — Periodic harvest and re-deposit of yield
 - [ ] **Multi-asset support** — ETH, WBTC, stablecoins beyond USDC
 - [ ] **Telegram / Discord interface** — Natural language via chat
+- [ ] **Wallet balance view** — Idle USDC across chains displayed in sidebar
+- [ ] **Wallet connect** — Browser wallet support (MetaMask, WalletConnect)
 
 ---
 

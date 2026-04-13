@@ -54,8 +54,20 @@ function runScript(scriptName, args = []) {
 
   broadcast('start', { script: scriptName, args });
 
+  let dotBuffer = '';
   child.stdout.on('data', (data) => {
-    const lines = data.toString().split('\n').filter(l => l.trim());
+    const raw = data.toString();
+    // Accumulate dot progress lines and flush when done
+    if (raw.includes('Scanning') || dotBuffer) {
+      dotBuffer += raw;
+      if (dotBuffer.includes('done')) {
+        const collapsed = dotBuffer.replace(/\n/g, '').trim();
+        broadcast('log', { text: collapsed });
+        dotBuffer = '';
+      }
+      return;
+    }
+    const lines = raw.split('\n').filter(l => l.trim());
     for (const line of lines) {
       broadcast('log', { line });
       console.log(`[${scriptName}]`, line);
@@ -237,6 +249,12 @@ app.get('/api/tx-history', (req, res) => {
       } else if (t.type === 'consolidate-deposit') {
         from = t.asset || 'USDC';
         to   = t.toVault || '—';
+      } else if (t.type === 'rebalance-withdraw') {
+        from = t.fromVault || '—';
+        to   = t.asset || 'USDC';
+      } else if (t.type === 'rebalance-deposit') {
+        from = t.asset || 'USDC';
+        to   = t.toVault || '—';
       } else if (t.type === 'consolidate') {
         from = t.fromVault || (t.fromChainId ? (CHAIN_NAMES[t.fromChainId] || String(t.fromChainId)) : '—');
         to   = t.toVault   || (t.toChainId   ? (CHAIN_NAMES[t.toChainId]   || String(t.toChainId))   : '—');
@@ -252,8 +270,9 @@ app.get('/api/tx-history', (req, res) => {
         chain: chainId,
         chainName: CHAIN_NAMES[chainId] || String(chainId || '—'),
         value: t.valueUsd ? String(t.valueUsd) : null,
-        txHash:  t.txHash  || null,
-        txHash2: t.txHash2 || null,
+        txHash:   t.txHash    || null,
+        txHash2:  t.txHash2   || null,
+        protocol: t.protocol  || null,
         type: t.type || 'tx',
       };
     });

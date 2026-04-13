@@ -171,7 +171,7 @@ async function withdrawPosition(position, walletAddress) {
       const receipt = await tx.wait();
       console.log(`✅ Confirmed in block: ${receipt.blockNumber}`);
       rl.close();
-      recordTx({ type:'withdraw', fromVault: position?.name || position?.vaultName, chainId: position?.chainId, valueUsd: position?.valueUsd , asset: 'USDC' });
+      recordTx({ type:'withdraw', fromVault: position?.name || position?.vaultName, chainId: position?.chainId, valueUsd: position?.valueUsd, asset: 'USDC', protocol: position?.protocol });
       console.log('\n🎉 Withdrawal complete! Stay Vaulthoric.');
       return;
     }
@@ -191,7 +191,7 @@ async function withdrawPosition(position, walletAddress) {
       const receipt = await tx.wait();
       console.log(`✅ Confirmed in block: ${receipt.blockNumber}`);
       rl.close();
-      recordTx({ type:'withdraw', fromVault: position?.name || position?.vaultName, chainId: position?.chainId, valueUsd: position?.valueUsd , asset: 'USDC' });
+      recordTx({ type:'withdraw', fromVault: position?.name || position?.vaultName, chainId: position?.chainId, valueUsd: position?.valueUsd, asset: 'USDC', protocol: position?.protocol });
       console.log('\n🎉 Withdrawal complete! Stay Vaulthoric.');
       return;
     } catch (redeemErr) {

@@ -345,7 +345,8 @@ async function main() {
       depositPack:       best.vault.depositPacks?.[0]?.name || '',
     });
     recordPosition(best.vault, best.vault.chainId);
-    recordTx({ type:'rebalance', fromVault: position.vaultName, toVault: best.vault.name, chainId: best.vault.chainId, valueUsd: position.valueUsd });
+    recordTx({ type:'rebalance-withdraw', fromVault: position.vaultName, chainId: position.chainId, valueUsd: position.valueUsd, asset: 'USDC', protocol: position.protocol });
+    recordTx({ type:'rebalance-deposit', toVault: best.vault.name, chainId: best.vault.chainId, valueUsd: position.valueUsd, asset: 'USDC', protocol: best.vault.protocol });
     console.log(`\n🎉 Rebalance complete! Stay Vaulthoric.`);
     console.log(`\n🤖 Vaulthoric will monitor your position and notify you`);
     console.log(`   if better yield opportunities appear.`);

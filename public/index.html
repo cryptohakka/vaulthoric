@@ -401,7 +401,9 @@ main{display:flex;flex-direction:column;padding:14px 14px 14px 4px;overflow:hidd
 // ─── State ────────────────────────────────────────────────────────────────────
 const SC = {
   ask:         {e:'🏦',t:'Deposit'},
-  rebalance:   {e:'⚖️',t:'Rebalance'},
+  rebalance:          {e:'⚖️',t:'Rebalance'},
+  'rebalance-withdraw':{e:'⚖️',t:'Rebalance Out'},
+  'rebalance-deposit': {e:'⚖️',t:'Rebalance In'},
   withdraw:    {e:'💸',t:'Withdraw'},
   consolidate: {e:'🔗',t:'Consolidate'},
 };
@@ -411,6 +413,19 @@ let uiState = {
   consolidate: { dryRun:false },
 };
 const CHAINS = {1:'Ethereum',42161:'Arbitrum',10:'Optimism',8453:'Base',137:'Polygon',59144:'Linea',534352:'Scroll',146:'Sonic',143:'Monad'};
+const PROTOCOL_LINKS = {
+  'aave-v3':         { name:'Aave',       url:'https://app.aave.com' },
+  'morpho-v1':       { name:'Morpho',     url:'https://app.morpho.org' },
+  'euler-v2':        { name:'Euler',      url:'https://app.euler.finance' },
+  'ether.fi-liquid': { name:'ether.fi',   url:'https://app.ether.fi' },
+  'ether.fi-stake':  { name:'ether.fi',   url:'https://app.ether.fi' },
+  'pendle':          { name:'Pendle',     url:'https://app.pendle.finance' },
+  'ethena-usde':     { name:'Ethena',     url:'https://app.ethena.fi' },
+  'maple':           { name:'Maple',      url:'https://app.maple.finance' },
+  'upshift':         { name:'Upshift',    url:'https://app.upshift.finance' },
+  'yo-protocol':     { name:'Yo Protocol',url:'https://app.yo.xyz' },
+  'neverland':       { name:'Neverland',  url:'https://neverland.fi' },
+};
 const EXPLORERS = {1:'https://etherscan.io/tx/',8453:'https://basescan.org/tx/',10:'https://optimistic.etherscan.io/tx/',42161:'https://arbiscan.io/tx/',137:'https://polygonscan.com/tx/',59144:'https://lineascan.build/tx/',534352:'https://scrollscan.com/tx/',146:'https://sonicscan.org/tx/',143:'https://monadexplorer.com/tx/'};
 let cur='ask', running=false, sse=null;
 
@@ -491,7 +506,7 @@ function updUI(){
 function renderScUI(){
   const el=document.getElementById('scUI');
   if(cur==='ask'){
-    el.innerHTML=`<textarea class="qi" id="qi" placeholder="e.g. deposit 100 USDC to best vault on Arbitrum" rows="3"></textarea>`;
+    el.innerHTML=`<textarea class="qi" id="qi" placeholder="e.g. deposit USDC to best vault on Base" rows="3"></textarea>`;
   }
   else if(cur==='rebalance'){
     el.innerHTML=`
@@ -745,6 +760,8 @@ async function loadTxHistory(){
 
       const summaryText=tx.type==='withdraw'?'Withdrew from '+escHtml(tx.from||'—')
         :tx.type==='deposit'?'Deposited into '+escHtml(tx.to||'—')
+        :tx.type==='rebalance-withdraw'?'Withdrew from '+escHtml(tx.from||'—')
+        :tx.type==='rebalance-deposit'?'Deposited into '+escHtml(tx.to||'—')
         :(tx.from&&tx.to)?escHtml(tx.from)+' → '+escHtml(tx.to)
         :escHtml(tx.to||tx.from||'—');
 
@@ -775,6 +792,7 @@ async function loadTxHistory(){
             <div class="mf"><label>To</label><span class="a">${escHtml(tx.to||'—')}</span></div>
             <div class="mf"><label>Value</label><span>${tx.value?'$'+parseFloat(tx.value).toFixed(2):'—'}</span></div>
             <div class="mf"><label>Chain</label><span>${escHtml(tx.chainName||CHAINS[tx.chain]||tx.chain||'—')}</span></div>
+            ${(()=>{const p=tx.protocol&&PROTOCOL_LINKS[tx.protocol];return p?`<div class="mf"><label>Protocol</label><span><a href="${p.url}" target="_blank" rel="noopener" class="a">${p.name}</a></span></div>`:''})()}
           </div>
           ${txLinksHtml}
         </div>`;
