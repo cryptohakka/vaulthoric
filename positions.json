@@ -1,22 +1,12 @@
 [
   {
-    "address": "0x4e65fe4dba92790696d040ac24aa414708f5c0ab",
-    "chainId": 8453,
-    "protocol": "aave-v3",
-    "name": "USDC",
-    "symbol": "USDC",
-    "decimals": 18,
-    "depositPack": "aave-zaps",
-    "addedAt": "2026-04-12T20:47:03.806Z"
-  },
-  {
-    "address": "0xbeeff7ae5e00aae3db302e4b0d8c883810a58100",
-    "chainId": 8453,
+    "address": "0xa8665084d8cd6276c00ca97cbc0bf4bc9ae94c79",
+    "chainId": 143,
     "protocol": "morpho-v1",
-    "name": "BBQUSDC",
+    "name": "HYPERUSDCA",
     "symbol": "USDC",
     "decimals": 18,
     "depositPack": "morpho-zaps",
-    "addedAt": "2026-04-12T20:59:11.031Z"
+    "addedAt": "2026-04-13T08:03:55.017Z"
   }
 ]

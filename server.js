@@ -217,16 +217,46 @@ app.get('/api/tx-history', (req, res) => {
     const p = path.join(__dirname, 'tx_history.json');
     if (!fs.existsSync(p)) return res.json({ txs: [] });
     const txs = JSON.parse(fs.readFileSync(p, 'utf8'));
-    const formatted = txs.map(t => ({
-      time: t.time ? new Date(t.time).toLocaleString('ja-JP', { timeZone: 'Asia/Tbilisi', month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '—',
-      from: t.fromVault || '—',
-      to:   t.toVault   || '—',
-      chain: t.chainId || t.toChainId || null,
-      chainName: {1:'Ethereum',8453:'Base',10:'Optimism',42161:'Arbitrum',137:'Polygon',59144:'Linea',534352:'Scroll',146:'Sonic',143:'Monad',5000:'Mantle'}[t.chainId||t.toChainId] || String(t.chainId||t.toChainId||'—'),
-      value: t.valueUsd ? String(t.valueUsd) : null,
-      txHash: t.txHash || null,
-      type: t.type || 'tx',
-    }));
+    const CHAIN_NAMES = {1:'Ethereum',8453:'Base',10:'Optimism',42161:'Arbitrum',137:'Polygon',59144:'Linea',534352:'Scroll',146:'Sonic',143:'Monad',5000:'Mantle'};
+    const formatted = txs.map(t => {
+      // from/to semantics by type:
+      // deposit:     from=USDC (asset),       to=vault token
+      // withdraw:    from=vault token,         to=USDC (asset)
+      // rebalance:   from=fromVault,           to=toVault
+      // consolidate: from=fromVault or chains, to=toVault
+      let from, to;
+      if (t.type === 'deposit') {
+        from = t.asset || 'USDC';
+        to   = t.toVault || '—';
+      } else if (t.type === 'withdraw') {
+        from = t.fromVault || '—';
+        to   = t.asset || 'USDC';
+      } else if (t.type === 'consolidate-bridge') {
+        from = CHAIN_NAMES[t.fromChainId] || String(t.fromChainId || '—');
+        to   = CHAIN_NAMES[t.toChainId]   || String(t.toChainId   || '—');
+      } else if (t.type === 'consolidate-deposit') {
+        from = t.asset || 'USDC';
+        to   = t.toVault || '—';
+      } else if (t.type === 'consolidate') {
+        from = t.fromVault || (t.fromChainId ? (CHAIN_NAMES[t.fromChainId] || String(t.fromChainId)) : '—');
+        to   = t.toVault   || (t.toChainId   ? (CHAIN_NAMES[t.toChainId]   || String(t.toChainId))   : '—');
+      } else {
+        from = t.fromVault || '—';
+        to   = t.toVault   || '—';
+      }
+      const chainId = t.chainId || t.fromChainId || t.toChainId || null;
+      return {
+        time: t.time ? new Date(t.time).toLocaleString('ja-JP', { timeZone: 'Asia/Tbilisi', month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '—',
+        from,
+        to,
+        chain: chainId,
+        chainName: CHAIN_NAMES[chainId] || String(chainId || '—'),
+        value: t.valueUsd ? String(t.valueUsd) : null,
+        txHash:  t.txHash  || null,
+        txHash2: t.txHash2 || null,
+        type: t.type || 'tx',
+      };
+    });
     res.json({ txs: formatted.slice(0, 50) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

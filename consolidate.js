@@ -19,6 +19,7 @@ const {
   getScanChainIds,
   getChainName,
   recordPosition,
+  recordTx,
   suppressRpcNoise,
 } = require('./tools');
 const { ensureAllowance, pollStatus, sendTx } = require('./composer');
@@ -210,7 +211,8 @@ async function bridgeAllParallel({ sources, toChainId, wallet }) {
   const submitted = await Promise.all(
     valid.map(async ({ src, quote }) => {
       try {
-        return await executeBridge({ fromChainId: src.chainId, toChainId, quote, wallet });
+        const res = await executeBridge({ fromChainId: src.chainId, toChainId, quote, wallet });
+        return { ...res, valueUsd: src.src?.amount ?? src.amount ?? null };
       } catch (e) {
         console.log(`  ❌ ${getChainName(src.chainId)}: tx failed — ${e.message?.slice(0, 60)}`);
         return null;
@@ -222,6 +224,10 @@ async function bridgeAllParallel({ sources, toChainId, wallet }) {
   const pending = submitted.filter(Boolean);
   if (pending.length === 0) { console.log('❌ No transactions submitted.'); return 0; }
 
+  // Record bridge txs
+  for (const s of pending) {
+    recordTx({ type:'consolidate-bridge', fromChainId: s.fromChainId, toChainId, valueUsd: s.valueUsd, chainId: s.fromChainId, txHash: s.txHash });
+  }
   console.log(`\n⏳ Waiting for ${pending.length} bridge(s) to complete...`);
   const results = await Promise.all(
     pending.map(({ txHash, fromChainId, estOut }) =>
@@ -350,6 +356,7 @@ async function depositBestVault({ chainId, amountWei, wallet, mode = 'best' }) {
         depositPack:       candidate.vault.depositPacks?.[0]?.name || '',
       });
       recordPosition(candidate.vault, chainId);
+      recordTx({ type:'consolidate-deposit', toVault: candidate.vault.name, toChainId: chainId, valueUsd: depositUsd, asset: 'USDC', txHash: result?.tx?.hash || result?.txHash || null });
       return result;
     } catch (e) {
       console.log(`  ⚠️  Failed: ${e.message?.slice(0, 60)} — trying next vault...`);
@@ -423,7 +430,8 @@ async function main() {
   });
   console.log(`  0. Auto (${suggested.name} ⭐)`);
 
-  const chainChoice = await prompt(rl, '\nTarget chain (number or 0 for auto): ');
+  const chainChoice = AUTO_MODE ? '0' : await prompt(rl, '\nTarget chain (number or 0 for auto): ');
+  if (AUTO_MODE) console.log('\nTarget chain (number or 0 for auto): 0 (auto)');
   let targetChainId;
   if (chainChoice === '0' || chainChoice === '') {
     targetChainId = suggested.chainId;

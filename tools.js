@@ -337,7 +337,7 @@ function suppressRpcNoise() {
 // ─── TX History ───────────────────────────────────────────────────────────────
 const TX_HISTORY_FILE = path.join(__dirname, 'tx_history.json');
 
-function recordTx({ type, fromVault, toVault, chainId, fromChainId, toChainId, valueUsd, txHash, txHash2 }) {
+function recordTx({ type, fromVault, toVault, asset, chainId, fromChainId, toChainId, valueUsd, txHash, txHash2 }) {
   let history = [];
   try { history = JSON.parse(fs.readFileSync(TX_HISTORY_FILE, 'utf8')); } catch {}
   history.unshift({
@@ -345,6 +345,7 @@ function recordTx({ type, fromVault, toVault, chainId, fromChainId, toChainId, v
     type,
     fromVault: fromVault || null,
     toVault:   toVault   || null,
+    asset:     asset     || null,
     chainId:   chainId   || null,
     fromChainId: fromChainId || null,
     toChainId:   toChainId   || null,
@@ -363,6 +364,7 @@ module.exports = {
   ERC4626_ABI,
   AAVE_POOL_ABI,
   // Addresses
+  CHAINS,
   AAVE_POOLS,
   USDC_ADDRESSES,
   CHAIN_NAME_TO_ID,

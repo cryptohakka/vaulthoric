@@ -202,6 +202,11 @@ main{display:flex;flex-direction:column;padding:14px 14px 14px 4px;overflow:hidd
 .nbadge{font-size:11px;padding:3px 8px;border-radius:20px;
   background:var(--surface2);color:var(--text3);border:1px solid var(--border);}
 
+/* AI Analysis box */
+.ai-analysis{font-size:12px;color:var(--text2);background:var(--surface2);
+  border-radius:8px;padding:10px 12px;border-left:3px solid var(--accent);
+  line-height:1.6;}
+
 /* Raw log accordion */
 .raw-log-wrap{border-top:1px solid var(--border);}
 .raw-log-toggle{display:flex;align-items:center;gap:6px;padding:8px 14px;
@@ -400,13 +405,13 @@ const SC = {
   withdraw:    {e:'💸',t:'Withdraw'},
   consolidate: {e:'🔗',t:'Consolidate'},
 };
-// UI state for selectors
 let uiState = {
   rebalance: { mode:'best', scope:'same' },
   withdraw:  { pos:null, full:true, amount:'' },
   consolidate: { dryRun:false },
 };
 const CHAINS = {1:'Ethereum',42161:'Arbitrum',10:'Optimism',8453:'Base',137:'Polygon',59144:'Linea',534352:'Scroll',146:'Sonic',143:'Monad'};
+const EXPLORERS = {1:'https://etherscan.io/tx/',8453:'https://basescan.org/tx/',10:'https://optimistic.etherscan.io/tx/',42161:'https://arbiscan.io/tx/',137:'https://polygonscan.com/tx/',59144:'https://lineascan.build/tx/',534352:'https://scrollscan.com/tx/',146:'https://sonicscan.org/tx/',143:'https://monadexplorer.com/tx/'};
 let cur='ask', running=false, sse=null;
 
 // ─── SSE ──────────────────────────────────────────────────────────────────────
@@ -467,7 +472,6 @@ function switchTab(name,btn){
 
 // ─── Scenarios ────────────────────────────────────────────────────────────────
 function selSc(btn){
-  // Switch to yield tab if not there
   if(!document.getElementById('tab-yield').classList.contains('active')){
     document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
     document.querySelectorAll('.nav-tab').forEach(b=>b.classList.remove('active'));
@@ -609,12 +613,11 @@ async function loadPos(){
         <div class="pos-apy">${x.apy?x.apy.toFixed(2)+'%':'—'}</div>
       </div>
     </div>`).join('');
-    // re-render withdraw UI if active
     if(cur==='withdraw')renderScUI();
   }catch{list.innerHTML='<div class="no-pos">Error loading</div>';}
 }
 
-// ─── Monitor log parser ───────────────────────────────────────────────────────
+// ─── Monitor log ─────────────────────────────────────────────────────────────
 async function loadMonitorLog(){
   const feed=document.getElementById('monFeed');
   feed.innerHTML='<div class="no-pos" style="text-align:center;padding:40px;color:var(--text3)">Loading…</div>';
@@ -653,11 +656,12 @@ function buildRunCard(run){
   if(isAlert){
     detailHtml=run.alerts.map((a,i)=>`
       <div class="mon-grid">
-        <div class="mf"><label>Better Vault</label><span class="a">${a.betterName||'—'}</span></div>
-        <div class="mf"><label>APY Gain</label><span class="g">+${a.improvement||'—'}%</span></div>
-        <div class="mf"><label>Est. Cost</label><span>${a.cost||'—'}</span></div>
+        <div class="mf"><label>Better Vault</label><span class="a">${escHtml(a.betterName||'—')}</span></div>
+        <div class="mf"><label>APY Gain</label><span class="g">+${escHtml(a.improvement||'—')}%</span></div>
+        <div class="mf"><label>Est. Cost</label><span>${escHtml(a.cost||'—')}</span></div>
         <div class="mf"><label>Efficiency</label><span class="${a.efficient===false?'o':'g'}">${a.efficient===false?'Check size ⚠':'Efficient ✓'}</span></div>
       </div>
+      ${a.aiAnalysis?`<div class="ai-analysis">🤖 ${escHtml(a.aiAnalysis)}</div>`:''}
       <div class="mon-actions">
         <button class="rb-btn" onclick="rbNow('${(a.query||'best').replace(/'/g,"\\'")}')">⚡ Rebalance Now</button>
         <span class="nbadge">${a.cross?'🔗 cross-chain':'⚡ same-chain'}</span>
@@ -669,7 +673,7 @@ function buildRunCard(run){
     <div class="mon-card-hdr" onclick="toggleCard(this)">
       <span class="mon-time">${run.time||'—'}</span>
       ${badge}
-      <span class="mon-summary">${summary}</span>
+      <span class="mon-summary">${escHtml(summary)}</span>
       <span class="mon-toggle">▾</span>
     </div>
     ${isAlert||run.rawLines?`
@@ -699,10 +703,12 @@ function toggleRaw(btn){
   body.classList.toggle('open');
   btn.classList.toggle('open');
 }
-function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function escHtml(s){
+  if(!s)return'';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
 function rbNow(q){
-  // Switch to yield tab, select rebalance
   document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(b=>b.classList.remove('active'));
   document.getElementById('tab-yield').classList.add('active');
@@ -722,29 +728,55 @@ async function loadTxHistory(){
     const {txs}=await res.json();
     document.getElementById('txCount').textContent=txs.length?txs.length+' transactions':'No transactions yet';
     if(!txs.length){
-      feed.innerHTML='<div class="no-pos" style="text-align:center;padding:40px;color:var(--text3)">No completed rebalances found.</div>';
+      feed.innerHTML='<div class="no-pos" style="text-align:center;padding:40px;color:var(--text3)">No transactions found.</div>';
       return;
     }
     feed.innerHTML='';
-    const EXPLORERS={1:'https://etherscan.io/tx/',8453:'https://basescan.org/tx/',10:'https://optimistic.etherscan.io/tx/',42161:'https://arbiscan.io/tx/',137:'https://polygonscan.com/tx/',59144:'https://lineascan.build/tx/',534352:'https://scrollscan.com/tx/',146:'https://sonicscan.org/tx/',143:'https://testnet.monadexplorer.com/tx/'};
     for(const tx of txs){
       const el=document.createElement('div');
       el.className='mon-card good';
-      const short=tx.txHash?tx.txHash.slice(0,10)+'…'+tx.txHash.slice(-6):'—';
+
+      const label=tx.type==='withdraw'?'💸 Withdraw'
+        :tx.type==='deposit'?'📥 Deposit'
+        :tx.type==='consolidate-bridge'?'🌉 Consolidate Bridge'
+        :tx.type==='consolidate-deposit'?'🔗 Consolidate Deposit'
+        :tx.type==='consolidate'?'🔗 Consolidate'
+        :'⚖️ Rebalance';
+
+      const summaryText=tx.type==='withdraw'?'Withdrew from '+escHtml(tx.from||'—')
+        :tx.type==='deposit'?'Deposited into '+escHtml(tx.to||'—')
+        :(tx.from&&tx.to)?escHtml(tx.from)+' → '+escHtml(tx.to)
+        :escHtml(tx.to||tx.from||'—');
+
+      // tx link helper
+      function txLink(hash){
+        if(!hash)return'';
+        const short=hash.slice(0,10)+'…'+hash.slice(-6);
+        const base=EXPLORERS[tx.chain]||'https://etherscan.io/tx/';
+        return`<a href="${base}${hash}" target="_blank" style="color:var(--accent);font-family:var(--mono);font-size:12px;">${escHtml(short)}</a>`;
+      }
+
+      const txLinks=[tx.txHash,tx.txHash2].filter(Boolean);
+      const txLinksHtml=txLinks.length
+        ?`<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px;">`
+          +txLinks.map((h,i)=>`<div>${i===0?'Tx:':i===1?'Tx2:':''}  ${txLink(h)}</div>`).join('')
+          +`</div>`
+        :'';
+
       el.innerHTML=`
         <div class="mon-card-hdr" style="cursor:default">
-          <span class="mon-time">${tx.time||'—'}</span>
-          <span class="mon-badge good">${tx.type==='withdraw'?'💸 Withdraw':tx.type==='deposit'?'📥 Deposit':tx.type==='consolidate'?'🔗 Consolidate':'⚖️ Rebalance'}</span>
-          <span class="mon-summary">${tx.type==='withdraw'?'Withdrew '+tx.from:tx.type==='deposit'?'Deposited into '+tx.to:tx.from&&tx.to?tx.from+' → '+tx.to:tx.to||tx.from||'—'}${tx.value?' ($'+parseFloat(tx.value).toFixed(2)+')':''}</span>
+          <span class="mon-time">${escHtml(tx.time||'—')}</span>
+          <span class="mon-badge good">${label}</span>
+          <span class="mon-summary">${summaryText}${tx.value?' ($'+parseFloat(tx.value).toFixed(2)+')':''}</span>
         </div>
         <div class="mon-detail open" style="padding:10px 14px;">
           <div class="mon-grid">
-            <div class="mf"><label>From</label><span>${tx.from||'—'}</span></div>
-            <div class="mf"><label>To</label><span class="a">${tx.to||'—'}</span></div>
-            <div class="mf"><label>Value</label><span>${tx.value?'$'+tx.value:'—'}</span></div>
-            <div class="mf"><label>Chain</label><span>${tx.chainName||tx.chain||'—'}</span></div>
+            <div class="mf"><label>From</label><span>${escHtml(tx.from||'—')}</span></div>
+            <div class="mf"><label>To</label><span class="a">${escHtml(tx.to||'—')}</span></div>
+            <div class="mf"><label>Value</label><span>${tx.value?'$'+parseFloat(tx.value).toFixed(2):'—'}</span></div>
+            <div class="mf"><label>Chain</label><span>${escHtml(tx.chainName||CHAINS[tx.chain]||tx.chain||'—')}</span></div>
           </div>
-          ${tx.txHash?`<div style="font-size:12px;margin-top:4px;"><a href="${EXPLORERS[tx.chain]||'https://etherscan.io/tx/'}${tx.txHash}" target="_blank" style="color:var(--accent);font-family:var(--mono)">${short}</a></div>`:''}
+          ${txLinksHtml}
         </div>`;
       feed.appendChild(el);
     }
