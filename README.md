@@ -18,7 +18,7 @@ Jumper's vault feature covers 20+ protocols across 60+ chains. That's powerful �
 
 | Feature | Description |
 |---|---|
-| 🧠 Natural language deposit | `"put my USDC into the safest vault above 5% APY on Arbitrum"` |
+| 🧠 Natural language deposit | `"put my USDC into the safest vault on Base"` |
 | ⚖️ Risk-adjusted scoring | APY stability + TVL + protocol trust, not just raw APY |
 | 🌉 Auto-bridge | Moves assets cross-chain to higher-yield opportunities |
 | 📦 Consolidate | Sweeps USDC from all chains into one vault in a single flow |
@@ -43,9 +43,9 @@ cp .env.example .env
 ### Natural Language Deposit
 
 ```bash
-node ask.js "put my USDC into the safest vault above 5% APY on Arbitrum"
-node ask.js "find the highest yield USDC vault on Base"
-node ask.js "deposit 100 USDC into a stable vault"
+node ask.js "put my USDC into the safest vault on Base"
+node ask.js "find the highest yield USDC vault on Arbitrum"
+node ask.js "deposit USDC into a stable vault"
 ```
 
 ### Scan & Allocate
@@ -261,7 +261,6 @@ LIFI_API_KEY=                                    # optional
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 AUTO_REBALANCE=false
 
-# Gas threshold for direct deposit fallback
 ```
 
 ---
