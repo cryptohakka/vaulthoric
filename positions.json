@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "address": "0x78999cc96d2ba0341588c60ccb0e91c6c33cf371",
+    "chainId": 143,
+    "protocol": "morpho-v1",
+    "name": "HYPERUSDCA",
+    "symbol": "USDC",
+    "decimals": 18,
+    "depositPack": "morpho-zaps",
+    "addedAt": "2026-04-14T05:55:54.160Z"
+  },
+  {
+    "address": "0x21649703fe63265058e9f22582552561af4afa3f",
+    "chainId": 143,
+    "protocol": "morpho-v1",
+    "name": "AUGUSTUSDC",
+    "symbol": "USDC",
+    "decimals": 18,
+    "depositPack": "morpho-zaps",
+    "addedAt": "2026-04-14T08:30:17.060Z"
+  }
+]

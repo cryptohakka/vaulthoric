@@ -28,7 +28,7 @@ suppressRpcNoise();
 
 const LIFI_API = 'https://li.quest/v1';
 const MIN_USD  = 0.5;
-const POLL_MAX = 120; // 10 min max per bridge
+const POLL_MAX = 300; // 25 min max per bridge
 const POLL_MS  = 5000;
 
 function prompt(rl, q) {

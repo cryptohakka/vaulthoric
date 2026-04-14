@@ -58,7 +58,7 @@ function runScript(scriptName, args = []) {
   child.stdout.on('data', (data) => {
     const raw = data.toString();
     // Accumulate dot progress lines and flush when done
-    if (raw.includes('Scanning') || dotBuffer) {
+    if (raw.trim().match(/^\.+$/) || (dotBuffer && !raw.includes('done'))) {
       dotBuffer += raw;
       if (dotBuffer.includes('done')) {
         const collapsed = dotBuffer.replace(/\n/g, '').trim();
@@ -285,6 +285,8 @@ const { scanPositions } = require('./withdraw');
 const { getVault } = require('./earn');
 let _posCache = null, _posCacheAt = 0;
 const POS_TTL = 60_000; // 60s cache
+
+app.post('/api/positions/invalidate', (req, res) => { _posCache = null; res.json({ ok: true }); });
 app.get('/api/positions', async (req, res) => {
   try {
     const wallet = process.env.WALLET_ADDRESS;

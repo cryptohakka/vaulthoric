@@ -291,7 +291,7 @@ async function main() {
   const improvement  = best.apy - (current?.apy || 0);
   const isCrossChain = best.vault.chainId !== position.chainId;
 
-  if (!autoTo && improvement < 0.1) {
+  if ((!autoTo || MODES.includes(autoTo)) && improvement < 0.1) {
     console.log(`✅ ${position.vaultName} is already the best vault on ${getChainName(position.chainId)} (APY: ${current?.apy.toFixed(2)}%).`);
     rl.close(); return;
   }
@@ -314,7 +314,7 @@ async function main() {
 
   // Step 3: Withdraw
   console.log(`\n🔄 Step 1: Withdrawing from ${position.vaultName}...`);
-  await withdrawAll(position);
+  await withdrawAll(position, { skipRecord: true });
 
   // Step 4: Wait for USDC on source chain
   await waitForUsdc(position.chainId, walletAddress, position.valueUsd * 0.95);

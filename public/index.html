@@ -447,7 +447,7 @@ function handle(m){
   else if(m.type==='done'){
     addL(m.code===0?'✓ Done.':'✗ Exit '+m.code,m.code===0?'ok':'err');
     setR(false);
-    window._positions=[];
+    window._positions=[];fetch('/api/positions/invalidate',{method:'POST',credentials:'include'});
     loadPos();
   }
   else if(m.type==='error'){addL('✗ '+m.message,'err');setR(false);}

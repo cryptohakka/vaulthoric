@@ -262,7 +262,6 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 AUTO_REBALANCE=false
 
 # Gas threshold for direct deposit fallback
-GAS_FALLBACK_THRESHOLD_USD=0.05
 ```
 
 ---
